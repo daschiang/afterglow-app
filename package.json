@@ -1,0 +1,16 @@
+{
+  "name": "afterglow-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "餘溫 - AI 記憶重建對話 demo（含後端 API 代理，金鑰不暴露給前端）",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
