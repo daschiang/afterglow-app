@@ -23,6 +23,10 @@ const PRICE_OUTPUT_PER_1M = Number(process.env.PRICE_OUTPUT_PER_1M) || 12.0;
 let db = null;
 let dbError = null;
 try {
+  const nodeMajorMinor = process.versions.node.split(".").map(Number);
+  if (nodeMajorMinor[0] < 22 || (nodeMajorMinor[0] === 22 && nodeMajorMinor[1] < 5)) {
+    throw new Error(`目前執行環境是 Node ${process.versions.node}，node:sqlite 需要 Node 22.5 以上才有，後台統計／使用者上傳紀錄功能會整個停用。`);
+  }
   const { DatabaseSync } = require("node:sqlite");
   const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "usage.db");
   fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -676,6 +680,28 @@ app.get("/admin", requireAdminAuth, (req, res) => {
 <script>
 let currentSettings = null;
 
+// 統一的 fetch 包裝：加上逾時（10 秒）跟清楚的錯誤訊息，
+// 這樣任何一段失敗都會直接顯示原因，不會讓畫面卡在「載入中...」看不出問題在哪。
+async function fetchJSON(url, options) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(url, { ...(options || {}), signal: controller.signal });
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* 回應不是 JSON，data 保持 null */ }
+    if (!res.ok) {
+      const msg = (data && data.error) || ("HTTP " + res.status);
+      throw new Error(msg);
+    }
+    return data;
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("請求逾時（10 秒內沒有回應），請確認伺服器是否正常運作");
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function formatHourLabel(h) {
   const parts = h.split("T");
   return parts.length > 1 ? parts[1] + ":00" : h;
@@ -724,14 +750,18 @@ function lineChart(containerId, data) {
 }
 
 async function loadOnline() {
-  const res = await fetch("/api/admin/online");
-  if (!res.ok) return;
-  const d = await res.json();
-  document.getElementById("onlineNow").textContent = d.current;
-  const chartData = d.history.map(function (r) {
-    return { label: r.created_at.slice(11, 16), value: r.online_count };
-  });
-  lineChart("onlineChart", chartData);
+  try {
+    const d = await fetchJSON("/api/admin/online");
+    document.getElementById("onlineNow").textContent = d.current;
+    const chartData = d.history.map(function (r) {
+      return { label: r.created_at.slice(11, 16), value: r.online_count };
+    });
+    lineChart("onlineChart", chartData);
+  } catch (e) {
+    console.error("loadOnline 失敗：", e);
+    document.getElementById("onlineNow").textContent = "讀取失敗";
+    document.getElementById("onlineChart").innerHTML = '<div class="err">' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 function renderEmergency(d) {
@@ -751,33 +781,46 @@ function renderEmergency(d) {
 }
 
 async function loadSettings() {
-  const res = await fetch("/api/admin/settings");
-  const d = await res.json();
-  renderEmergency(d);
+  try {
+    const d = await fetchJSON("/api/admin/settings");
+    renderEmergency(d);
+  } catch (e) {
+    console.error("loadSettings 失敗：", e);
+    document.getElementById("modeStatus").innerHTML = '<span class="err">讀取緊急控制設定失敗：' + escapeHtml(e.message) + '</span>';
+    const toggleBtn = document.getElementById("toggleBtn");
+    toggleBtn.textContent = "讀取失敗，請重新整理頁面";
+    toggleBtn.disabled = true;
+  }
 }
 
 async function toggleMaintenance() {
   const next = !currentSettings.maintenanceMode;
   if (next && !confirm("確定要立即關閉 AI 功能嗎？所有人都無法使用整理記憶／對話功能，直到你手動解除為止。")) return;
-  const res = await fetch("/api/admin/settings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ maintenanceMode: next }),
-  });
-  const d = await res.json();
-  renderEmergency({ ...currentSettings, ...d });
+  try {
+    const d = await fetchJSON("/api/admin/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maintenanceMode: next }),
+    });
+    renderEmergency({ ...currentSettings, ...d });
+  } catch (e) {
+    alert("切換失敗：" + e.message);
+  }
 }
 
 async function saveMessage() {
   const msg = document.getElementById("msgInput").value;
-  const res = await fetch("/api/admin/settings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ maintenanceMessage: msg }),
-  });
-  const d = await res.json();
-  renderEmergency({ ...currentSettings, ...d });
-  alert("已儲存");
+  try {
+    const d = await fetchJSON("/api/admin/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maintenanceMessage: msg }),
+    });
+    renderEmergency({ ...currentSettings, ...d });
+    alert("已儲存");
+  } catch (e) {
+    alert("儲存失敗：" + e.message);
+  }
 }
 
 async function testConnection() {
@@ -787,12 +830,11 @@ async function testConnection() {
   resultEl.textContent = "測試中...";
   resultEl.className = "muted";
   try {
-    const res = await fetch("/api/admin/test-connection", { method: "POST" });
-    const d = await res.json();
+    const d = await fetchJSON("/api/admin/test-connection", { method: "POST" });
     resultEl.textContent = d.ok ? ("連線正常（" + d.duration_ms + "ms）") : ("失敗：" + d.message);
     resultEl.className = d.ok ? "muted" : "err";
   } catch (e) {
-    resultEl.textContent = "測試失敗，請確認伺服器本身有沒有在跑";
+    resultEl.textContent = "測試失敗：" + e.message;
     resultEl.className = "err";
   } finally {
     btn.disabled = false;
@@ -800,32 +842,32 @@ async function testConnection() {
 }
 
 async function load() {
-  const res = await fetch("/api/admin/stats");
-  if (!res.ok) {
-    document.getElementById("status").textContent = "讀取失敗：" + res.status;
-    return;
+  try {
+    const d = await fetchJSON("/api/admin/stats");
+    document.getElementById("status").textContent = "模型：" + d.model + "（估算單價 輸入 $" + d.pricing.inputPer1M + " / 輸出 $" + d.pricing.outputPer1M + " 每百萬 tokens，換模型記得改 .env 裡的價格設定才會準）";
+
+    const cards = [
+      ["總呼叫次數", d.totals.calls],
+      ["成功", d.totals.ok_calls],
+      ["失敗", d.totals.error_calls],
+      ["總 tokens", d.totals.total_tokens.toLocaleString()],
+      ["估算花費（美金）", "$" + d.totals.estimatedCostUsd],
+    ];
+    document.getElementById("app").innerHTML =
+      '<div class="cards">' + cards.map(c => '<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div></div>').join("") + '</div>' +
+      section("依用途分類", ["用途","次數","輸入 tokens","輸出 tokens"], d.byKind.map(r => [r.kind, r.calls, r.prompt_tokens, r.completion_tokens])) +
+      section("最近 30 天", ["日期","次數","輸入 tokens","輸出 tokens"], d.byDay.map(r => [r.day, r.calls, r.prompt_tokens, r.completion_tokens])) +
+      section("依 IP 排行（找異常流量用）", ["IP","次數","總 tokens"], d.byIp.map(r => [r.ip, r.calls, r.total_tokens])) +
+      section("最近的錯誤", ["時間","用途","IP","錯誤訊息"], d.recentErrors.map(r => [r.created_at, r.kind, r.ip, '<span class="err">'+(r.error_message||"")+'</span>']));
+
+    const hourData = (d.byHour || []).slice().reverse().map(function (r) {
+      return { label: formatHourLabel(r.hour), value: r.calls };
+    });
+    barChart("hourChart", hourData);
+  } catch (e) {
+    console.error("load 失敗：", e);
+    document.getElementById("status").innerHTML = '<span class="err">讀取用量統計失敗：' + escapeHtml(e.message) + '</span>';
   }
-  const d = await res.json();
-  document.getElementById("status").textContent = "模型：" + d.model + "（估算單價 輸入 $" + d.pricing.inputPer1M + " / 輸出 $" + d.pricing.outputPer1M + " 每百萬 tokens，換模型記得改 .env 裡的價格設定才會準）";
-
-  const cards = [
-    ["總呼叫次數", d.totals.calls],
-    ["成功", d.totals.ok_calls],
-    ["失敗", d.totals.error_calls],
-    ["總 tokens", d.totals.total_tokens.toLocaleString()],
-    ["估算花費（美金）", "$" + d.totals.estimatedCostUsd],
-  ];
-  document.getElementById("app").innerHTML =
-    '<div class="cards">' + cards.map(c => '<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div></div>').join("") + '</div>' +
-    section("依用途分類", ["用途","次數","輸入 tokens","輸出 tokens"], d.byKind.map(r => [r.kind, r.calls, r.prompt_tokens, r.completion_tokens])) +
-    section("最近 30 天", ["日期","次數","輸入 tokens","輸出 tokens"], d.byDay.map(r => [r.day, r.calls, r.prompt_tokens, r.completion_tokens])) +
-    section("依 IP 排行（找異常流量用）", ["IP","次數","總 tokens"], d.byIp.map(r => [r.ip, r.calls, r.total_tokens])) +
-    section("最近的錯誤", ["時間","用途","IP","錯誤訊息"], d.recentErrors.map(r => [r.created_at, r.kind, r.ip, '<span class="err">'+(r.error_message||"")+'</span>']));
-
-  const hourData = (d.byHour || []).slice().reverse().map(function (r) {
-    return { label: formatHourLabel(r.hour), value: r.calls };
-  });
-  barChart("hourChart", hourData);
 }
 function section(title, headers, rows) {
   return '<section><h3>'+title+'</h3><table><thead><tr>' +
@@ -851,12 +893,14 @@ async function loadUploads() {
     sort: uploadsState.sort,
     dir: uploadsState.dir,
   });
-  const res = await fetch("/api/admin/uploads?" + params.toString());
-  if (!res.ok) {
-    document.getElementById("uploadsTbody").innerHTML = '<tr><td colspan="8" class="err">讀取失敗：' + res.status + '</td></tr>';
+  let d;
+  try {
+    d = await fetchJSON("/api/admin/uploads?" + params.toString());
+  } catch (e) {
+    console.error("loadUploads 失敗：", e);
+    document.getElementById("uploadsTbody").innerHTML = '<tr><td colspan="8" class="err">讀取失敗：' + escapeHtml(e.message) + '</td></tr>';
     return;
   }
-  const d = await res.json();
   document.getElementById("uploadsTotal").textContent = d.total;
   uploadsState.sort = d.sort;
   uploadsState.dir = d.dir;
@@ -904,9 +948,7 @@ async function loadUploadDetail(id) {
   const el = document.getElementById("detail-" + id);
   if (!el) return;
   try {
-    const res = await fetch("/api/admin/uploads/" + id);
-    const d = await res.json();
-    if (!res.ok) { el.textContent = "讀取失敗：" + (d.error || res.status); return; }
+    const d = await fetchJSON("/api/admin/uploads/" + id);
     let memoriesPreview = "";
     try {
       const mem = JSON.parse(d.memories_json || "[]");
@@ -919,7 +961,7 @@ async function loadUploadDetail(id) {
       '<div style="color:#E8A660;margin:10px 0 4px;">記憶庫內容</div>' + (escapeHtml(memoriesPreview) || "（無）") +
       '<div style="color:#E8A660;margin:10px 0 4px;">原始貼上／檔案內容</div>' + (escapeHtml(d.raw_content) || "（無）");
   } catch (e) {
-    el.textContent = "讀取失敗";
+    el.innerHTML = '<span class="err">讀取失敗：' + escapeHtml(e.message) + '</span>';
   }
 }
 
@@ -946,17 +988,17 @@ document.getElementById("uploadsTable").addEventListener("click", function (e) {
     loadUploads();
   } else if (action === "toggle") {
     const next = btn.getAttribute("data-next") === "1";
-    fetch("/api/admin/uploads/" + id + "/public", {
+    fetchJSON("/api/admin/uploads/" + id + "/public", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ isPublic: next }),
-    }).then(function () { loadUploads(); });
+    }).then(function () { loadUploads(); }).catch(function (e) { alert("切換失敗：" + e.message); });
   } else if (action === "delete") {
     if (!confirm("確定要刪除這筆上傳紀錄嗎？此操作無法復原。")) return;
-    fetch("/api/admin/uploads/" + id, { method: "DELETE" }).then(function () {
+    fetchJSON("/api/admin/uploads/" + id, { method: "DELETE" }).then(function () {
       if (uploadsState.openId === id) uploadsState.openId = null;
       loadUploads();
-    });
+    }).catch(function (e) { alert("刪除失敗：" + e.message); });
   }
 });
 

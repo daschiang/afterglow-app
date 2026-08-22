@@ -532,14 +532,14 @@ function Afterglow() {
       } catch (e) {}
       try {
         const consent = await storage.get("afterglow-data-consent");
-        if (consent && consent.value === "1") {
-          setDataConsentGiven(true);
-          consentDecidedRef.current = true;
-        }
+        if (consent && consent.value === "1") setDataConsentGiven(true);
         const mode = await storage.get("afterglow-share-mode");
         if (mode && mode.value) {
+          // 只有「真的走過新版三選一流程」（存在 afterglow-share-mode）才算已經決定過，
+          // 舊版遺留的 afterglow-data-consent 不能拿來當作已經問過，不然使用者永遠不會看到選擇視窗。
           setShareMode(mode.value);
           shareModeRef.current = mode.value;
+          consentDecidedRef.current = true;
         }
       } catch (e) {}
       try {
