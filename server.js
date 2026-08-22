@@ -57,6 +57,22 @@ try {
       online_count INTEGER NOT NULL
     );
   `);
+  // 存放使用者上傳的原始聊天紀錄與整理後的記憶庫
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_uploads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      session_id TEXT,
+      source_name TEXT,
+      raw_content TEXT,
+      memories_json TEXT,
+      style_summary TEXT,
+      persona_name TEXT,
+      persona_relationship TEXT,
+      is_public INTEGER DEFAULT 0,
+      ip TEXT
+    );
+  `);
   console.log(`用量統計資料庫已就緒：${DB_PATH}`);
 } catch (e) {
   dbError = e.message || String(e);
@@ -148,6 +164,46 @@ setInterval(() => {
 // 避免 demo 現場才發現金鑰忘了設定。
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, keyConfigured: Boolean(OPENAI_API_KEY), maintenanceMode: isMaintenanceMode(), maintenanceMessage: isMaintenanceMode() ? maintenanceMessage() : null });
+});
+
+// 儲存使用者上傳的聊天紀錄（整理進記憶庫時同步呼叫）
+app.post("/api/save-upload", (req, res) => {
+  if (!db) return res.json({ ok: false });
+  const { sessionId, sourceName, rawContent, memoriesJson, styleSummary, personaName, personaRelationship, isPublic } = req.body || {};
+  const clientIp = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString().split(",")[0].trim();
+  try {
+    db.prepare(`
+      INSERT INTO user_uploads (created_at, session_id, source_name, raw_content, memories_json, style_summary, persona_name, persona_relationship, is_public, ip)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      new Date().toISOString(),
+      sessionId || "",
+      sourceName || "",
+      rawContent || "",
+      typeof memoriesJson === "string" ? memoriesJson : JSON.stringify(memoriesJson || []),
+      styleSummary || "",
+      personaName || "",
+      personaRelationship || "",
+      isPublic ? 1 : 0,
+      clientIp
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.warn("儲存上傳記錄失敗：", e.message);
+    res.json({ ok: false });
+  }
+});
+
+// 更新公開同意狀態（後台或使用者可以切換）
+app.post("/api/set-public", (req, res) => {
+  if (!db) return res.json({ ok: false });
+  const { uploadId, isPublic } = req.body || {};
+  try {
+    db.prepare("UPDATE user_uploads SET is_public = ? WHERE id = ?").run(isPublic ? 1 : 0, uploadId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.json({ ok: false });
+  }
 });
 
 // 唯一對外的 AI 端點：前端只送 system / messages / max_tokens，
@@ -350,6 +406,8 @@ app.get("/api/admin/stats", requireAdminAuth, (req, res) => {
       byHour,
       byIp,
       recentErrors,
+      uploadCount: db.prepare("SELECT COUNT(*) AS c FROM user_uploads").get().c,
+      publicCount: db.prepare("SELECT COUNT(*) AS c FROM user_uploads WHERE is_public=    	1").get().c,
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "讀取統計失敗" });
@@ -388,6 +446,67 @@ app.post("/api/admin/settings", requireAdminAuth, (req, res) => {
   if (typeof nextMode === "boolean") setSetting("maintenance_mode", nextMode ? "1" : "0");
   if (typeof nextMessage === "string" && nextMessage.trim()) setSetting("maintenance_message", nextMessage.trim().slice(0, 300));
   res.json({ ok: true, maintenanceMode: isMaintenanceMode(), maintenanceMessage: maintenanceMessage() });
+});
+
+// 允許依哪些欄位排序，白名單擋掉其他輸入，避免 SQL injection 或打錯欄位名稱噴錯誤。
+const UPLOADS_SORTABLE_COLUMNS = {
+  created_at: "created_at",
+  persona_name: "persona_name",
+  is_public: "is_public",
+  memory_count: "memory_count",
+  raw_len: "raw_len",
+};
+
+app.get("/api/admin/uploads", requireAdminAuth, (req, res) => {
+  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const perPage = 20;
+  const offset = (page - 1) * perPage;
+  const filter = req.query.filter || "all"; // all | public | private
+  const where = filter === "public" ? "WHERE is_public=1" : filter === "private" ? "WHERE is_public=0" : "";
+  const sortKey = UPLOADS_SORTABLE_COLUMNS[req.query.sort] ? req.query.sort : "created_at";
+  const sortCol = UPLOADS_SORTABLE_COLUMNS[sortKey];
+  const sortDir = String(req.query.dir).toLowerCase() === "asc" ? "ASC" : "DESC";
+  const total = db.prepare(`SELECT COUNT(*) AS c FROM user_uploads ${where}`).get().c;
+  const rows = db.prepare(
+    `SELECT id, created_at, session_id, source_name, style_summary, persona_name, persona_relationship, is_public, ip,
+            length(raw_content) AS raw_len,
+            json_array_length(memories_json) AS memory_count
+     FROM user_uploads ${where}
+     ORDER BY ${sortCol} ${sortDir}, id ${sortDir}
+     LIMIT ? OFFSET ?`
+  ).all(perPage, offset);
+  res.json({ total, page, perPage, rows, sort: sortKey, dir: sortDir.toLowerCase() });
+});
+
+app.get("/api/admin/uploads/:id", requireAdminAuth, (req, res) => {
+  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
+  const row = db.prepare("SELECT * FROM user_uploads WHERE id = ?").get(req.params.id);
+  if (!row) return res.status(404).json({ error: "找不到" });
+  res.json(row);
+});
+
+// 後台自己切換某一筆上傳的公開狀態（跟 /api/set-public 分開，這條有帳密保護）。
+app.post("/api/admin/uploads/:id/public", requireAdminAuth, (req, res) => {
+  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
+  const { isPublic } = req.body || {};
+  try {
+    db.prepare("UPDATE user_uploads SET is_public = ? WHERE id = ?").run(isPublic ? 1 : 0, req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "更新失敗" });
+  }
+});
+
+// 後台刪除一筆上傳紀錄（使用者要求下架／撤回同意時用）。
+app.delete("/api/admin/uploads/:id", requireAdminAuth, (req, res) => {
+  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
+  try {
+    db.prepare("DELETE FROM user_uploads WHERE id = ?").run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "刪除失敗" });
+  }
 });
 
 // 快速自我檢測：不改任何資料，單純打一個最小的請求給 OpenAI，
@@ -453,6 +572,20 @@ app.get("/admin", requireAdminAuth, (req, res) => {
   .chart-wrap { overflow-x: auto; }
   svg.chart { display: block; }
   svg.chart rect:hover, svg.chart circle:hover { opacity: 0.8; }
+  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.sortable:hover { color: #F2E9E4; }
+  th.sortable .arrow { color: #E8A660; margin-left: 2px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .pill-public { background: #1e3a2a; color: #9adfb8; }
+  .pill-private { background: #3a2a2a; color: #d9a8a8; }
+  .filter-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .filter-tabs button { background: #382b3f; color: #9a8b93; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+  .filter-tabs button.active { background: #E8A660; color: #17111C; font-weight: 600; }
+  .link-btn { background: none; border: none; color: #E8A660; cursor: pointer; font-size: 12px; padding: 0; text-decoration: underline; }
+  .row-detail { background: #17111C; border: 1px solid #382b3f; border-radius: 8px; padding: 10px 12px; margin: 6px 0 12px; font-size: 12px; white-space: pre-wrap; max-height: 260px; overflow-y: auto; }
+  .pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .pager button { background: #382b3f; color: #F2E9E4; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+  .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -498,6 +631,43 @@ app.get("/admin", requireAdminAuth, (req, res) => {
   <h2>使用時間趨勢（最近 48 小時，依小時統計呼叫次數）</h2>
   <div class="chart-wrap">
     <div id="hourChart"></div>
+  </div>
+</section>
+
+<section>
+  <h2>使用者上傳的聊天紀錄（<span id="uploadsTotal">-</span> 筆）</h2>
+  <div class="muted" style="margin-bottom:10px;">
+    點欄位標題可以排序；「公開」代表使用者當初整理記憶時選擇同意公開，「私人」則是使用者選擇只私下保留在伺服器（未同意公開）。
+    點「查看內容」可以展開這筆的原始貼上文字／記憶庫內容；「切換公開狀態」「刪除」可以在使用者要求下架時操作。
+  </div>
+  <div class="filter-tabs" id="uploadFilterTabs">
+    <button data-filter="all" class="active">全部</button>
+    <button data-filter="public">公開</button>
+    <button data-filter="private">私人</button>
+  </div>
+  <div style="overflow-x:auto;">
+    <table id="uploadsTable">
+      <thead>
+        <tr>
+          <th class="sortable" data-sort="created_at">時間 <span class="arrow"></span></th>
+          <th class="sortable" data-sort="persona_name">角色 <span class="arrow"></span></th>
+          <th>來源檔名</th>
+          <th class="sortable" data-sort="memory_count">記憶數 <span class="arrow"></span></th>
+          <th class="sortable" data-sort="raw_len">原文長度 <span class="arrow"></span></th>
+          <th class="sortable" data-sort="is_public">公開狀態 <span class="arrow"></span></th>
+          <th>IP</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="uploadsTbody">
+        <tr><td colspan="8" class="muted">載入中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="pager">
+    <button id="uploadsPrevBtn">← 上一頁</button>
+    <span class="muted" id="uploadsPageInfo"></span>
+    <button id="uploadsNextBtn">下一頁 →</button>
   </div>
 </section>
 
@@ -665,12 +835,155 @@ function section(title, headers, rows) {
     '</tbody></table></section>';
 }
 
+// ---- 使用者上傳的聊天紀錄：排序、篩選、分頁、查看內容、切換公開狀態、刪除 ----
+const uploadsState = { page: 1, filter: "all", sort: "created_at", dir: "desc", openId: null };
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+async function loadUploads() {
+  const params = new URLSearchParams({
+    page: uploadsState.page,
+    filter: uploadsState.filter,
+    sort: uploadsState.sort,
+    dir: uploadsState.dir,
+  });
+  const res = await fetch("/api/admin/uploads?" + params.toString());
+  if (!res.ok) {
+    document.getElementById("uploadsTbody").innerHTML = '<tr><td colspan="8" class="err">讀取失敗：' + res.status + '</td></tr>';
+    return;
+  }
+  const d = await res.json();
+  document.getElementById("uploadsTotal").textContent = d.total;
+  uploadsState.sort = d.sort;
+  uploadsState.dir = d.dir;
+
+  document.querySelectorAll("#uploadsTable th.sortable .arrow").forEach(function (el) { el.textContent = ""; });
+  const activeTh = document.querySelector('#uploadsTable th[data-sort="' + uploadsState.sort + '"] .arrow');
+  if (activeTh) activeTh.textContent = uploadsState.dir === "asc" ? "▲" : "▼";
+
+  const tbody = document.getElementById("uploadsTbody");
+  if (!d.rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">目前沒有資料</td></tr>';
+  } else {
+    tbody.innerHTML = d.rows.map(function (r) {
+      const pill = r.is_public ? '<span class="pill pill-public">公開</span>' : '<span class="pill pill-private">私人</span>';
+      const rowHtml =
+        '<tr>' +
+        '<td>' + escapeHtml(r.created_at) + '</td>' +
+        '<td>' + escapeHtml(r.persona_name || "（未命名）") + (r.persona_relationship ? '<div class="muted">' + escapeHtml(r.persona_relationship) + '</div>' : '') + '</td>' +
+        '<td>' + escapeHtml(r.source_name || "（手動貼上）") + '</td>' +
+        '<td>' + (r.memory_count == null ? 0 : r.memory_count) + '</td>' +
+        '<td>' + (r.raw_len || 0) + ' 字</td>' +
+        '<td>' + pill + '</td>' +
+        '<td>' + escapeHtml(r.ip || "") + '</td>' +
+        '<td>' +
+          '<button class="link-btn" data-action="view" data-id="' + r.id + '">查看內容</button> ' +
+          '<button class="link-btn" data-action="toggle" data-id="' + r.id + '" data-next="' + (r.is_public ? 0 : 1) + '">切換公開狀態</button> ' +
+          '<button class="link-btn" data-action="delete" data-id="' + r.id + '" style="color:#C97B84;">刪除</button>' +
+        '</td>' +
+        '</tr>';
+      const detailHtml = uploadsState.openId === r.id
+        ? '<tr><td colspan="8"><div class="row-detail" id="detail-' + r.id + '">載入中...</div></td></tr>'
+        : '';
+      return rowHtml + detailHtml;
+    }).join("");
+    if (uploadsState.openId) loadUploadDetail(uploadsState.openId);
+  }
+
+  const totalPages = Math.max(1, Math.ceil(d.total / d.perPage));
+  document.getElementById("uploadsPageInfo").textContent = "第 " + d.page + " / " + totalPages + " 頁";
+  document.getElementById("uploadsPrevBtn").disabled = d.page <= 1;
+  document.getElementById("uploadsNextBtn").disabled = d.page >= totalPages;
+}
+
+async function loadUploadDetail(id) {
+  const el = document.getElementById("detail-" + id);
+  if (!el) return;
+  try {
+    const res = await fetch("/api/admin/uploads/" + id);
+    const d = await res.json();
+    if (!res.ok) { el.textContent = "讀取失敗：" + (d.error || res.status); return; }
+    let memoriesPreview = "";
+    try {
+      const mem = JSON.parse(d.memories_json || "[]");
+      memoriesPreview = mem.map(function (m) { return "・[" + (m.category || "") + "] " + (m.content || ""); }).join("\n");
+    } catch (e) {
+      memoriesPreview = "（記憶庫格式解析失敗）";
+    }
+    el.innerHTML =
+      '<div style="color:#E8A660;margin-bottom:4px;">語氣摘要</div>' + escapeHtml(d.style_summary || "（無）") +
+      '<div style="color:#E8A660;margin:10px 0 4px;">記憶庫內容</div>' + (escapeHtml(memoriesPreview) || "（無）") +
+      '<div style="color:#E8A660;margin:10px 0 4px;">原始貼上／檔案內容</div>' + (escapeHtml(d.raw_content) || "（無）");
+  } catch (e) {
+    el.textContent = "讀取失敗";
+  }
+}
+
+document.getElementById("uploadsTable").addEventListener("click", function (e) {
+  const th = e.target.closest("th.sortable");
+  if (th) {
+    const col = th.getAttribute("data-sort");
+    if (uploadsState.sort === col) {
+      uploadsState.dir = uploadsState.dir === "asc" ? "desc" : "asc";
+    } else {
+      uploadsState.sort = col;
+      uploadsState.dir = "desc";
+    }
+    uploadsState.page = 1;
+    loadUploads();
+    return;
+  }
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const id = Number(btn.getAttribute("data-id"));
+  const action = btn.getAttribute("data-action");
+  if (action === "view") {
+    uploadsState.openId = uploadsState.openId === id ? null : id;
+    loadUploads();
+  } else if (action === "toggle") {
+    const next = btn.getAttribute("data-next") === "1";
+    fetch("/api/admin/uploads/" + id + "/public", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isPublic: next }),
+    }).then(function () { loadUploads(); });
+  } else if (action === "delete") {
+    if (!confirm("確定要刪除這筆上傳紀錄嗎？此操作無法復原。")) return;
+    fetch("/api/admin/uploads/" + id, { method: "DELETE" }).then(function () {
+      if (uploadsState.openId === id) uploadsState.openId = null;
+      loadUploads();
+    });
+  }
+});
+
+document.getElementById("uploadFilterTabs").addEventListener("click", function (e) {
+  const btn = e.target.closest("button[data-filter]");
+  if (!btn) return;
+  document.querySelectorAll("#uploadFilterTabs button").forEach(function (b) { b.classList.remove("active"); });
+  btn.classList.add("active");
+  uploadsState.filter = btn.getAttribute("data-filter");
+  uploadsState.page = 1;
+  loadUploads();
+});
+
+document.getElementById("uploadsPrevBtn").addEventListener("click", function () {
+  if (uploadsState.page > 1) { uploadsState.page -= 1; loadUploads(); }
+});
+document.getElementById("uploadsNextBtn").addEventListener("click", function () {
+  uploadsState.page += 1; loadUploads();
+});
+
 document.getElementById("toggleBtn").addEventListener("click", toggleMaintenance);
 document.getElementById("saveMsgBtn").addEventListener("click", saveMessage);
 document.getElementById("testBtn").addEventListener("click", testConnection);
 loadSettings();
 load();
 loadOnline();
+loadUploads();
 setInterval(loadOnline, 30000);
 setInterval(load, 60000);
 </script>
