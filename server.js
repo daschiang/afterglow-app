@@ -769,6 +769,15 @@ function section(title, headers, rows) {
     '</tbody></table></section>';
 }
 
+// ---- 用戶上傳紀錄 ----
+// 這三個變數要在下面 loadUploads("all") 被呼叫「之前」先宣告好，
+// 不然會踩到 let 的 TDZ（Temporal Dead Zone）：
+// loadUploads 內部一開始就會讀寫 uploadCurrentFilter，如果宣告寫在呼叫之後，
+// 呼叫當下這個變數還沒初始化，會丟 ReferenceError，導致上傳紀錄那個區塊永遠讀不出來。
+let uploadCurrentFilter = "all";
+let uploadCurrentPage = 1;
+let uploadTotalPages = 1;
+
 document.getElementById("toggleBtn").addEventListener("click", toggleMaintenance);
 document.getElementById("saveMsgBtn").addEventListener("click", saveMessage);
 document.getElementById("testBtn").addEventListener("click", testConnection);
@@ -778,11 +787,6 @@ loadOnline();
 loadUploads("all");
 setInterval(loadOnline, 30000);
 setInterval(load, 60000);
-
-// ---- 用戶上傳紀錄 ----
-let uploadCurrentFilter = "all";
-let uploadCurrentPage = 1;
-let uploadTotalPages = 1;
 
 async function loadUploads(filter) {
   if (filter) { uploadCurrentFilter = filter; uploadCurrentPage = 1; }
