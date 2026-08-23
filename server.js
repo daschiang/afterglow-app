@@ -23,10 +23,6 @@ const PRICE_OUTPUT_PER_1M = Number(process.env.PRICE_OUTPUT_PER_1M) || 12.0;
 let db = null;
 let dbError = null;
 try {
-  const nodeMajorMinor = process.versions.node.split(".").map(Number);
-  if (nodeMajorMinor[0] < 22 || (nodeMajorMinor[0] === 22 && nodeMajorMinor[1] < 5)) {
-    throw new Error(`目前執行環境是 Node ${process.versions.node}，node:sqlite 需要 Node 22.5 以上才有，後台統計／使用者上傳紀錄功能會整個停用。`);
-  }
   const { DatabaseSync } = require("node:sqlite");
   const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "usage.db");
   fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -411,7 +407,7 @@ app.get("/api/admin/stats", requireAdminAuth, (req, res) => {
       byIp,
       recentErrors,
       uploadCount: db.prepare("SELECT COUNT(*) AS c FROM user_uploads").get().c,
-      publicCount: db.prepare("SELECT COUNT(*) AS c FROM user_uploads WHERE is_public=    	1").get().c,
+      publicCount: db.prepare("SELECT COUNT(*) AS c FROM user_uploads WHERE is_public=1").get().c,
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "讀取統計失敗" });
@@ -452,15 +448,6 @@ app.post("/api/admin/settings", requireAdminAuth, (req, res) => {
   res.json({ ok: true, maintenanceMode: isMaintenanceMode(), maintenanceMessage: maintenanceMessage() });
 });
 
-// 允許依哪些欄位排序，白名單擋掉其他輸入，避免 SQL injection 或打錯欄位名稱噴錯誤。
-const UPLOADS_SORTABLE_COLUMNS = {
-  created_at: "created_at",
-  persona_name: "persona_name",
-  is_public: "is_public",
-  memory_count: "memory_count",
-  raw_len: "raw_len",
-};
-
 app.get("/api/admin/uploads", requireAdminAuth, (req, res) => {
   if (!db) return res.status(503).json({ error: "資料庫未就緒" });
   const page = Math.max(1, Number(req.query.page) || 1);
@@ -468,19 +455,14 @@ app.get("/api/admin/uploads", requireAdminAuth, (req, res) => {
   const offset = (page - 1) * perPage;
   const filter = req.query.filter || "all"; // all | public | private
   const where = filter === "public" ? "WHERE is_public=1" : filter === "private" ? "WHERE is_public=0" : "";
-  const sortKey = UPLOADS_SORTABLE_COLUMNS[req.query.sort] ? req.query.sort : "created_at";
-  const sortCol = UPLOADS_SORTABLE_COLUMNS[sortKey];
-  const sortDir = String(req.query.dir).toLowerCase() === "asc" ? "ASC" : "DESC";
   const total = db.prepare(`SELECT COUNT(*) AS c FROM user_uploads ${where}`).get().c;
   const rows = db.prepare(
     `SELECT id, created_at, session_id, source_name, style_summary, persona_name, persona_relationship, is_public, ip,
             length(raw_content) AS raw_len,
             json_array_length(memories_json) AS memory_count
-     FROM user_uploads ${where}
-     ORDER BY ${sortCol} ${sortDir}, id ${sortDir}
-     LIMIT ? OFFSET ?`
+     FROM user_uploads ${where} ORDER BY id DESC LIMIT ? OFFSET ?`
   ).all(perPage, offset);
-  res.json({ total, page, perPage, rows, sort: sortKey, dir: sortDir.toLowerCase() });
+  res.json({ total, page, perPage, rows });
 });
 
 app.get("/api/admin/uploads/:id", requireAdminAuth, (req, res) => {
@@ -488,29 +470,6 @@ app.get("/api/admin/uploads/:id", requireAdminAuth, (req, res) => {
   const row = db.prepare("SELECT * FROM user_uploads WHERE id = ?").get(req.params.id);
   if (!row) return res.status(404).json({ error: "找不到" });
   res.json(row);
-});
-
-// 後台自己切換某一筆上傳的公開狀態（跟 /api/set-public 分開，這條有帳密保護）。
-app.post("/api/admin/uploads/:id/public", requireAdminAuth, (req, res) => {
-  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
-  const { isPublic } = req.body || {};
-  try {
-    db.prepare("UPDATE user_uploads SET is_public = ? WHERE id = ?").run(isPublic ? 1 : 0, req.params.id);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message || "更新失敗" });
-  }
-});
-
-// 後台刪除一筆上傳紀錄（使用者要求下架／撤回同意時用）。
-app.delete("/api/admin/uploads/:id", requireAdminAuth, (req, res) => {
-  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
-  try {
-    db.prepare("DELETE FROM user_uploads WHERE id = ?").run(req.params.id);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message || "刪除失敗" });
-  }
 });
 
 // 快速自我檢測：不改任何資料，單純打一個最小的請求給 OpenAI，
@@ -576,20 +535,6 @@ app.get("/admin", requireAdminAuth, (req, res) => {
   .chart-wrap { overflow-x: auto; }
   svg.chart { display: block; }
   svg.chart rect:hover, svg.chart circle:hover { opacity: 0.8; }
-  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
-  th.sortable:hover { color: #F2E9E4; }
-  th.sortable .arrow { color: #E8A660; margin-left: 2px; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-  .pill-public { background: #1e3a2a; color: #9adfb8; }
-  .pill-private { background: #3a2a2a; color: #d9a8a8; }
-  .filter-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
-  .filter-tabs button { background: #382b3f; color: #9a8b93; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
-  .filter-tabs button.active { background: #E8A660; color: #17111C; font-weight: 600; }
-  .link-btn { background: none; border: none; color: #E8A660; cursor: pointer; font-size: 12px; padding: 0; text-decoration: underline; }
-  .row-detail { background: #17111C; border: 1px solid #382b3f; border-radius: 8px; padding: 10px 12px; margin: 6px 0 12px; font-size: 12px; white-space: pre-wrap; max-height: 260px; overflow-y: auto; }
-  .pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-  .pager button { background: #382b3f; color: #F2E9E4; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
-  .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -638,69 +583,32 @@ app.get("/admin", requireAdminAuth, (req, res) => {
   </div>
 </section>
 
-<section>
-  <h2>使用者上傳的聊天紀錄（<span id="uploadsTotal">-</span> 筆）</h2>
-  <div class="muted" style="margin-bottom:10px;">
-    點欄位標題可以排序；「公開」代表使用者當初整理記憶時選擇同意公開，「私人」則是使用者選擇只私下保留在伺服器（未同意公開）。
-    點「查看內容」可以展開這筆的原始貼上文字／記憶庫內容；「切換公開狀態」「刪除」可以在使用者要求下架時操作。
+<div class="muted" id="status" style="margin-top:24px;">載入中...</div>
+
+<section style="margin-top:20px;">
+  <h2>📂 用戶上傳紀錄</h2>
+  <div id="uploadSummary" class="muted" style="margin-bottom:10px;">載入中...</div>
+  <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
+    <button class="btn btn-neutral" onclick="loadUploads('all')" id="filterAll">全部</button>
+    <button class="btn btn-neutral" onclick="loadUploads('public')" id="filterPublic">✅ 已公開</button>
+    <button class="btn btn-neutral" onclick="loadUploads('private')" id="filterPrivate">🔒 未公開</button>
+    <span id="uploadPageInfo" class="muted" style="align-self:center;"></span>
+    <button class="btn btn-neutral" id="prevPage" onclick="changePage(-1)" style="display:none;">◀ 上一頁</button>
+    <button class="btn btn-neutral" id="nextPage" onclick="changePage(1)" style="display:none;">下一頁 ▶</button>
   </div>
-  <div class="filter-tabs" id="uploadFilterTabs">
-    <button data-filter="all" class="active">全部</button>
-    <button data-filter="public">公開</button>
-    <button data-filter="private">私人</button>
+  <div id="uploadDetail" style="display:none; margin-bottom:12px; background:#241A2B; border:1px solid #382b3f; border-radius:10px; padding:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <strong id="detailTitle" style="font-size:13px;"></strong>
+      <button class="btn btn-neutral" onclick="closeDetail()" style="padding:4px 10px; font-size:12px;">關閉</button>
+    </div>
+    <div id="detailBody" style="font-size:12px; color:#9a8b93; white-space:pre-wrap; max-height:300px; overflow-y:auto;"></div>
   </div>
-  <div style="overflow-x:auto;">
-    <table id="uploadsTable">
-      <thead>
-        <tr>
-          <th class="sortable" data-sort="created_at">時間 <span class="arrow"></span></th>
-          <th class="sortable" data-sort="persona_name">角色 <span class="arrow"></span></th>
-          <th>來源檔名</th>
-          <th class="sortable" data-sort="memory_count">記憶數 <span class="arrow"></span></th>
-          <th class="sortable" data-sort="raw_len">原文長度 <span class="arrow"></span></th>
-          <th class="sortable" data-sort="is_public">公開狀態 <span class="arrow"></span></th>
-          <th>IP</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody id="uploadsTbody">
-        <tr><td colspan="8" class="muted">載入中...</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <div class="pager">
-    <button id="uploadsPrevBtn">← 上一頁</button>
-    <span class="muted" id="uploadsPageInfo"></span>
-    <button id="uploadsNextBtn">下一頁 →</button>
-  </div>
+  <div id="uploadList"></div>
 </section>
 
-<div class="muted" id="status" style="margin-top:24px;">載入中...</div>
 <div id="app"></div>
 <script>
 let currentSettings = null;
-
-// 統一的 fetch 包裝：加上逾時（10 秒）跟清楚的錯誤訊息，
-// 這樣任何一段失敗都會直接顯示原因，不會讓畫面卡在「載入中...」看不出問題在哪。
-async function fetchJSON(url, options) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
-  try {
-    const res = await fetch(url, { ...(options || {}), signal: controller.signal });
-    let data = null;
-    try { data = await res.json(); } catch (e) { /* 回應不是 JSON，data 保持 null */ }
-    if (!res.ok) {
-      const msg = (data && data.error) || ("HTTP " + res.status);
-      throw new Error(msg);
-    }
-    return data;
-  } catch (e) {
-    if (e.name === "AbortError") throw new Error("請求逾時（10 秒內沒有回應），請確認伺服器是否正常運作");
-    throw e;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 
 function formatHourLabel(h) {
   const parts = h.split("T");
@@ -750,18 +658,14 @@ function lineChart(containerId, data) {
 }
 
 async function loadOnline() {
-  try {
-    const d = await fetchJSON("/api/admin/online");
-    document.getElementById("onlineNow").textContent = d.current;
-    const chartData = d.history.map(function (r) {
-      return { label: r.created_at.slice(11, 16), value: r.online_count };
-    });
-    lineChart("onlineChart", chartData);
-  } catch (e) {
-    console.error("loadOnline 失敗：", e);
-    document.getElementById("onlineNow").textContent = "讀取失敗";
-    document.getElementById("onlineChart").innerHTML = '<div class="err">' + escapeHtml(e.message) + '</div>';
-  }
+  const res = await fetch("/api/admin/online");
+  if (!res.ok) return;
+  const d = await res.json();
+  document.getElementById("onlineNow").textContent = d.current;
+  const chartData = d.history.map(function (r) {
+    return { label: r.created_at.slice(11, 16), value: r.online_count };
+  });
+  lineChart("onlineChart", chartData);
 }
 
 function renderEmergency(d) {
@@ -781,46 +685,33 @@ function renderEmergency(d) {
 }
 
 async function loadSettings() {
-  try {
-    const d = await fetchJSON("/api/admin/settings");
-    renderEmergency(d);
-  } catch (e) {
-    console.error("loadSettings 失敗：", e);
-    document.getElementById("modeStatus").innerHTML = '<span class="err">讀取緊急控制設定失敗：' + escapeHtml(e.message) + '</span>';
-    const toggleBtn = document.getElementById("toggleBtn");
-    toggleBtn.textContent = "讀取失敗，請重新整理頁面";
-    toggleBtn.disabled = true;
-  }
+  const res = await fetch("/api/admin/settings");
+  const d = await res.json();
+  renderEmergency(d);
 }
 
 async function toggleMaintenance() {
   const next = !currentSettings.maintenanceMode;
   if (next && !confirm("確定要立即關閉 AI 功能嗎？所有人都無法使用整理記憶／對話功能，直到你手動解除為止。")) return;
-  try {
-    const d = await fetchJSON("/api/admin/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ maintenanceMode: next }),
-    });
-    renderEmergency({ ...currentSettings, ...d });
-  } catch (e) {
-    alert("切換失敗：" + e.message);
-  }
+  const res = await fetch("/api/admin/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ maintenanceMode: next }),
+  });
+  const d = await res.json();
+  renderEmergency({ ...currentSettings, ...d });
 }
 
 async function saveMessage() {
   const msg = document.getElementById("msgInput").value;
-  try {
-    const d = await fetchJSON("/api/admin/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ maintenanceMessage: msg }),
-    });
-    renderEmergency({ ...currentSettings, ...d });
-    alert("已儲存");
-  } catch (e) {
-    alert("儲存失敗：" + e.message);
-  }
+  const res = await fetch("/api/admin/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ maintenanceMessage: msg }),
+  });
+  const d = await res.json();
+  renderEmergency({ ...currentSettings, ...d });
+  alert("已儲存");
 }
 
 async function testConnection() {
@@ -830,11 +721,12 @@ async function testConnection() {
   resultEl.textContent = "測試中...";
   resultEl.className = "muted";
   try {
-    const d = await fetchJSON("/api/admin/test-connection", { method: "POST" });
+    const res = await fetch("/api/admin/test-connection", { method: "POST" });
+    const d = await res.json();
     resultEl.textContent = d.ok ? ("連線正常（" + d.duration_ms + "ms）") : ("失敗：" + d.message);
     resultEl.className = d.ok ? "muted" : "err";
   } catch (e) {
-    resultEl.textContent = "測試失敗：" + e.message;
+    resultEl.textContent = "測試失敗，請確認伺服器本身有沒有在跑";
     resultEl.className = "err";
   } finally {
     btn.disabled = false;
@@ -842,32 +734,32 @@ async function testConnection() {
 }
 
 async function load() {
-  try {
-    const d = await fetchJSON("/api/admin/stats");
-    document.getElementById("status").textContent = "模型：" + d.model + "（估算單價 輸入 $" + d.pricing.inputPer1M + " / 輸出 $" + d.pricing.outputPer1M + " 每百萬 tokens，換模型記得改 .env 裡的價格設定才會準）";
-
-    const cards = [
-      ["總呼叫次數", d.totals.calls],
-      ["成功", d.totals.ok_calls],
-      ["失敗", d.totals.error_calls],
-      ["總 tokens", d.totals.total_tokens.toLocaleString()],
-      ["估算花費（美金）", "$" + d.totals.estimatedCostUsd],
-    ];
-    document.getElementById("app").innerHTML =
-      '<div class="cards">' + cards.map(c => '<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div></div>').join("") + '</div>' +
-      section("依用途分類", ["用途","次數","輸入 tokens","輸出 tokens"], d.byKind.map(r => [r.kind, r.calls, r.prompt_tokens, r.completion_tokens])) +
-      section("最近 30 天", ["日期","次數","輸入 tokens","輸出 tokens"], d.byDay.map(r => [r.day, r.calls, r.prompt_tokens, r.completion_tokens])) +
-      section("依 IP 排行（找異常流量用）", ["IP","次數","總 tokens"], d.byIp.map(r => [r.ip, r.calls, r.total_tokens])) +
-      section("最近的錯誤", ["時間","用途","IP","錯誤訊息"], d.recentErrors.map(r => [r.created_at, r.kind, r.ip, '<span class="err">'+(r.error_message||"")+'</span>']));
-
-    const hourData = (d.byHour || []).slice().reverse().map(function (r) {
-      return { label: formatHourLabel(r.hour), value: r.calls };
-    });
-    barChart("hourChart", hourData);
-  } catch (e) {
-    console.error("load 失敗：", e);
-    document.getElementById("status").innerHTML = '<span class="err">讀取用量統計失敗：' + escapeHtml(e.message) + '</span>';
+  const res = await fetch("/api/admin/stats");
+  if (!res.ok) {
+    document.getElementById("status").textContent = "讀取失敗：" + res.status;
+    return;
   }
+  const d = await res.json();
+  document.getElementById("status").textContent = "模型：" + d.model + "（估算單價 輸入 $" + d.pricing.inputPer1M + " / 輸出 $" + d.pricing.outputPer1M + " 每百萬 tokens，換模型記得改 .env 裡的價格設定才會準）";
+
+  const cards = [
+    ["總呼叫次數", d.totals.calls],
+    ["成功", d.totals.ok_calls],
+    ["失敗", d.totals.error_calls],
+    ["總 tokens", d.totals.total_tokens.toLocaleString()],
+    ["估算花費（美金）", "$" + d.totals.estimatedCostUsd],
+  ];
+  document.getElementById("app").innerHTML =
+    '<div class="cards">' + cards.map(c => '<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div></div>').join("") + '</div>' +
+    section("依用途分類", ["用途","次數","輸入 tokens","輸出 tokens"], d.byKind.map(r => [r.kind, r.calls, r.prompt_tokens, r.completion_tokens])) +
+    section("最近 30 天", ["日期","次數","輸入 tokens","輸出 tokens"], d.byDay.map(r => [r.day, r.calls, r.prompt_tokens, r.completion_tokens])) +
+    section("依 IP 排行（找異常流量用）", ["IP","次數","總 tokens"], d.byIp.map(r => [r.ip, r.calls, r.total_tokens])) +
+    section("最近的錯誤", ["時間","用途","IP","錯誤訊息"], d.recentErrors.map(r => [r.created_at, r.kind, r.ip, '<span class="err">'+(r.error_message||"")+'</span>']));
+
+  const hourData = (d.byHour || []).slice().reverse().map(function (r) {
+    return { label: formatHourLabel(r.hour), value: r.calls };
+  });
+  barChart("hourChart", hourData);
 }
 function section(title, headers, rows) {
   return '<section><h3>'+title+'</h3><table><thead><tr>' +
@@ -877,157 +769,89 @@ function section(title, headers, rows) {
     '</tbody></table></section>';
 }
 
-// ---- 使用者上傳的聊天紀錄：排序、篩選、分頁、查看內容、切換公開狀態、刪除 ----
-const uploadsState = { page: 1, filter: "all", sort: "created_at", dir: "desc", openId: null };
-
-function escapeHtml(s) {
-  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-  });
-}
-
-async function loadUploads() {
-  const params = new URLSearchParams({
-    page: uploadsState.page,
-    filter: uploadsState.filter,
-    sort: uploadsState.sort,
-    dir: uploadsState.dir,
-  });
-  let d;
-  try {
-    d = await fetchJSON("/api/admin/uploads?" + params.toString());
-  } catch (e) {
-    console.error("loadUploads 失敗：", e);
-    document.getElementById("uploadsTbody").innerHTML = '<tr><td colspan="8" class="err">讀取失敗：' + escapeHtml(e.message) + '</td></tr>';
-    return;
-  }
-  document.getElementById("uploadsTotal").textContent = d.total;
-  uploadsState.sort = d.sort;
-  uploadsState.dir = d.dir;
-
-  document.querySelectorAll("#uploadsTable th.sortable .arrow").forEach(function (el) { el.textContent = ""; });
-  const activeTh = document.querySelector('#uploadsTable th[data-sort="' + uploadsState.sort + '"] .arrow');
-  if (activeTh) activeTh.textContent = uploadsState.dir === "asc" ? "▲" : "▼";
-
-  const tbody = document.getElementById("uploadsTbody");
-  if (!d.rows.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="muted">目前沒有資料</td></tr>';
-  } else {
-    tbody.innerHTML = d.rows.map(function (r) {
-      const pill = r.is_public ? '<span class="pill pill-public">公開</span>' : '<span class="pill pill-private">私人</span>';
-      const rowHtml =
-        '<tr>' +
-        '<td>' + escapeHtml(r.created_at) + '</td>' +
-        '<td>' + escapeHtml(r.persona_name || "（未命名）") + (r.persona_relationship ? '<div class="muted">' + escapeHtml(r.persona_relationship) + '</div>' : '') + '</td>' +
-        '<td>' + escapeHtml(r.source_name || "（手動貼上）") + '</td>' +
-        '<td>' + (r.memory_count == null ? 0 : r.memory_count) + '</td>' +
-        '<td>' + (r.raw_len || 0) + ' 字</td>' +
-        '<td>' + pill + '</td>' +
-        '<td>' + escapeHtml(r.ip || "") + '</td>' +
-        '<td>' +
-          '<button class="link-btn" data-action="view" data-id="' + r.id + '">查看內容</button> ' +
-          '<button class="link-btn" data-action="toggle" data-id="' + r.id + '" data-next="' + (r.is_public ? 0 : 1) + '">切換公開狀態</button> ' +
-          '<button class="link-btn" data-action="delete" data-id="' + r.id + '" style="color:#C97B84;">刪除</button>' +
-        '</td>' +
-        '</tr>';
-      const detailHtml = uploadsState.openId === r.id
-        ? '<tr><td colspan="8"><div class="row-detail" id="detail-' + r.id + '">載入中...</div></td></tr>'
-        : '';
-      return rowHtml + detailHtml;
-    }).join("");
-    if (uploadsState.openId) loadUploadDetail(uploadsState.openId);
-  }
-
-  const totalPages = Math.max(1, Math.ceil(d.total / d.perPage));
-  document.getElementById("uploadsPageInfo").textContent = "第 " + d.page + " / " + totalPages + " 頁";
-  document.getElementById("uploadsPrevBtn").disabled = d.page <= 1;
-  document.getElementById("uploadsNextBtn").disabled = d.page >= totalPages;
-}
-
-async function loadUploadDetail(id) {
-  const el = document.getElementById("detail-" + id);
-  if (!el) return;
-  try {
-    const d = await fetchJSON("/api/admin/uploads/" + id);
-    let memoriesPreview = "";
-    try {
-      const mem = JSON.parse(d.memories_json || "[]");
-      memoriesPreview = mem.map(function (m) { return "・[" + (m.category || "") + "] " + (m.content || ""); }).join("\n");
-    } catch (e) {
-      memoriesPreview = "（記憶庫格式解析失敗）";
-    }
-    el.innerHTML =
-      '<div style="color:#E8A660;margin-bottom:4px;">語氣摘要</div>' + escapeHtml(d.style_summary || "（無）") +
-      '<div style="color:#E8A660;margin:10px 0 4px;">記憶庫內容</div>' + (escapeHtml(memoriesPreview) || "（無）") +
-      '<div style="color:#E8A660;margin:10px 0 4px;">原始貼上／檔案內容</div>' + (escapeHtml(d.raw_content) || "（無）");
-  } catch (e) {
-    el.innerHTML = '<span class="err">讀取失敗：' + escapeHtml(e.message) + '</span>';
-  }
-}
-
-document.getElementById("uploadsTable").addEventListener("click", function (e) {
-  const th = e.target.closest("th.sortable");
-  if (th) {
-    const col = th.getAttribute("data-sort");
-    if (uploadsState.sort === col) {
-      uploadsState.dir = uploadsState.dir === "asc" ? "desc" : "asc";
-    } else {
-      uploadsState.sort = col;
-      uploadsState.dir = "desc";
-    }
-    uploadsState.page = 1;
-    loadUploads();
-    return;
-  }
-  const btn = e.target.closest("button[data-action]");
-  if (!btn) return;
-  const id = Number(btn.getAttribute("data-id"));
-  const action = btn.getAttribute("data-action");
-  if (action === "view") {
-    uploadsState.openId = uploadsState.openId === id ? null : id;
-    loadUploads();
-  } else if (action === "toggle") {
-    const next = btn.getAttribute("data-next") === "1";
-    fetchJSON("/api/admin/uploads/" + id + "/public", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ isPublic: next }),
-    }).then(function () { loadUploads(); }).catch(function (e) { alert("切換失敗：" + e.message); });
-  } else if (action === "delete") {
-    if (!confirm("確定要刪除這筆上傳紀錄嗎？此操作無法復原。")) return;
-    fetchJSON("/api/admin/uploads/" + id, { method: "DELETE" }).then(function () {
-      if (uploadsState.openId === id) uploadsState.openId = null;
-      loadUploads();
-    }).catch(function (e) { alert("刪除失敗：" + e.message); });
-  }
-});
-
-document.getElementById("uploadFilterTabs").addEventListener("click", function (e) {
-  const btn = e.target.closest("button[data-filter]");
-  if (!btn) return;
-  document.querySelectorAll("#uploadFilterTabs button").forEach(function (b) { b.classList.remove("active"); });
-  btn.classList.add("active");
-  uploadsState.filter = btn.getAttribute("data-filter");
-  uploadsState.page = 1;
-  loadUploads();
-});
-
-document.getElementById("uploadsPrevBtn").addEventListener("click", function () {
-  if (uploadsState.page > 1) { uploadsState.page -= 1; loadUploads(); }
-});
-document.getElementById("uploadsNextBtn").addEventListener("click", function () {
-  uploadsState.page += 1; loadUploads();
-});
-
 document.getElementById("toggleBtn").addEventListener("click", toggleMaintenance);
 document.getElementById("saveMsgBtn").addEventListener("click", saveMessage);
 document.getElementById("testBtn").addEventListener("click", testConnection);
 loadSettings();
 load();
 loadOnline();
-loadUploads();
+loadUploads("all");
 setInterval(loadOnline, 30000);
 setInterval(load, 60000);
+
+// ---- 用戶上傳紀錄 ----
+let uploadCurrentFilter = "all";
+let uploadCurrentPage = 1;
+let uploadTotalPages = 1;
+
+async function loadUploads(filter) {
+  if (filter) { uploadCurrentFilter = filter; uploadCurrentPage = 1; }
+  ["filterAll","filterPublic","filterPrivate"].forEach(id => document.getElementById(id).style.opacity = "0.5");
+  const activeId = uploadCurrentFilter === "public" ? "filterPublic" : uploadCurrentFilter === "private" ? "filterPrivate" : "filterAll";
+  document.getElementById(activeId).style.opacity = "1";
+
+  const res = await fetch("/api/admin/uploads?filter=" + uploadCurrentFilter + "&page=" + uploadCurrentPage);
+  if (!res.ok) { document.getElementById("uploadList").innerHTML = '<div class="muted">讀取失敗</div>'; return; }
+  const d = await res.json();
+  uploadTotalPages = Math.max(1, Math.ceil(d.total / d.perPage));
+
+  document.getElementById("uploadSummary").textContent = "共 " + d.total + " 筆上傳紀錄（已公開：透過此頁按鈕切換）";
+  document.getElementById("uploadPageInfo").textContent = d.total > d.perPage ? "第 " + d.page + " / " + uploadTotalPages + " 頁" : "";
+  document.getElementById("prevPage").style.display = uploadCurrentPage > 1 ? "inline-block" : "none";
+  document.getElementById("nextPage").style.display = uploadCurrentPage < uploadTotalPages ? "inline-block" : "none";
+
+  if (!d.rows.length) {
+    document.getElementById("uploadList").innerHTML = '<div class="muted" style="padding:12px;">目前還沒有上傳紀錄，使用者整理記憶後才會出現。</div>';
+    return;
+  }
+  document.getElementById("uploadList").innerHTML =
+    '<table><thead><tr>' +
+    '<th>時間</th><th>角色</th><th>來源</th><th>記憶則數</th><th>原文大小</th><th>IP</th><th>公開狀態</th><th>查看內容</th>' +
+    '</tr></thead><tbody>' +
+    d.rows.map(r => '<tr>' +
+      '<td>' + r.created_at.slice(0,16).replace("T"," ") + '</td>' +
+      '<td>' + (r.persona_name||"-") + (r.persona_relationship ? "（"+r.persona_relationship+"）" : "") + '</td>' +
+      '<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (r.source_name||"-") + '</td>' +
+      '<td>' + (r.memory_count||0) + ' 則</td>' +
+      '<td>' + (r.raw_len ? (Math.round(r.raw_len/100)/10)+"k 字" : "-") + '</td>' +
+      '<td style="font-size:11px;color:#9a8b93;">' + (r.ip||"-") + '</td>' +
+      '<td><button class="btn ' + (r.is_public ? "btn-safe" : "btn-neutral") + '" style="padding:4px 10px; font-size:12px;" onclick="togglePublic(' + r.id + ',' + r.is_public + ')">' + (r.is_public ? "✅ 公開中" : "🔒 未公開") + '</button></td>' +
+      '<td><button class="btn btn-neutral" style="padding:4px 10px; font-size:12px;" onclick="viewUpload(' + r.id + ')">查看</button></td>' +
+    '</tr>').join("") +
+    '</tbody></table>';
+}
+
+function changePage(delta) {
+  uploadCurrentPage = Math.max(1, Math.min(uploadTotalPages, uploadCurrentPage + delta));
+  loadUploads();
+}
+
+async function togglePublic(id, current) {
+  await fetch("/api/set-public", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ uploadId: id, isPublic: !current }) });
+  loadUploads();
+}
+
+async function viewUpload(id) {
+  const res = await fetch("/api/admin/uploads/" + id);
+  if (!res.ok) return;
+  const d = await res.json();
+  document.getElementById("detailTitle").textContent =
+    "[" + d.created_at.slice(0,16).replace("T"," ") + "] " + (d.persona_name||"") + "（" + (d.source_name||"未知來源") + "）";
+  let body = "";
+  if (d.style_summary) body += "【語氣摘要】\n" + d.style_summary + "\n\n";
+  try {
+    const mems = JSON.parse(d.memories_json || "[]");
+    if (mems.length) body += "【記憶庫項目】\n" + mems.map((m,i) => (i+1)+". ["+m.category+"] "+m.content).join("\n") + "\n\n";
+  } catch(e) {}
+  if (d.raw_content) body += "【原始上傳內容】\n" + d.raw_content.slice(0, 3000) + (d.raw_content.length > 3000 ? "\n…（內容過長，只顯示前 3000 字）" : "");
+  document.getElementById("detailBody").textContent = body || "（無內容）";
+  document.getElementById("uploadDetail").style.display = "block";
+  document.getElementById("uploadDetail").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closeDetail() {
+  document.getElementById("uploadDetail").style.display = "none";
+}
 </script>
 </body>
 </html>`);

@@ -322,44 +322,6 @@ async function idbSet(key, value) {
   });
 }
 
-// ---- 上傳識別碼：跟每 30 秒的心跳 sessionId 不同，這個要長期保留（存在 localStorage），
-// 這樣同一個人多次「整理進記憶庫」的上傳紀錄，在後台可以看出是同一個瀏覽器來的。
-async function getOrCreateUploadSessionId() {
-  const existing = await storage.get("afterglow-upload-session-id");
-  if (existing && existing.value) return existing.value;
-  const id = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await storage.set("afterglow-upload-session-id", id);
-  return id;
-}
-
-// 把這次整理出來的內容依使用者的分享設定送到伺服器：
-// "local"   -> 完全不送，只留在使用者自己的瀏覽器
-// "private" -> 送到伺服器，但標記不公開（後台看得到，公開頁面看不到）
-// "public"  -> 送到伺服器，並標記為公開
-// 盡量存得完整（原始貼上內容、整理出的記憶庫、語氣摘要、角色設定），這樣以後才不用重新整理一次。
-async function saveUploadToServer({ sourceName, rawContent, memories, styleSummary, persona, shareMode }) {
-  if (shareMode === "local" || !rawContent) return;
-  try {
-    const sessionId = await getOrCreateUploadSessionId();
-    await fetch("/api/save-upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId,
-        sourceName: sourceName || "",
-        rawContent,
-        memoriesJson: JSON.stringify(memories || []),
-        styleSummary: styleSummary || "",
-        personaName: (persona && persona.name) || "",
-        personaRelationship: (persona && persona.relationship) || "",
-        isPublic: shareMode === "public",
-      }),
-    });
-  } catch (e) {
-    // 上傳記錄失敗不影響本機功能，安靜略過就好
-  }
-}
-
 // ---- 簡易線條圖示（純 SVG，不依賴外部圖示套件）----
 function IconSend({ size = 14, color = "currentColor" }) {
   return (
@@ -479,10 +441,6 @@ function Afterglow() {
   const [keyConfigured, setKeyConfigured] = useState(true);
   const [dataConsentGiven, setDataConsentGiven] = useState(false);
   const [showConsentModal, setShowConsentModal] = useState(false);
-  const [shareMode, setShareMode] = useState("private"); // "public" | "private" | "local"
-  const shareModeRef = useRef("private");
-  const consentDecidedRef = useRef(false);
-  const consentResolverRef = useRef(null);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [maintenanceMessage, setMaintenanceMessage] = useState("");
   const [persona, setPersona] = useState(null);
@@ -533,14 +491,6 @@ function Afterglow() {
       try {
         const consent = await storage.get("afterglow-data-consent");
         if (consent && consent.value === "1") setDataConsentGiven(true);
-        const mode = await storage.get("afterglow-share-mode");
-        if (mode && mode.value) {
-          // 只有「真的走過新版三選一流程」（存在 afterglow-share-mode）才算已經決定過，
-          // 舊版遺留的 afterglow-data-consent 不能拿來當作已經問過，不然使用者永遠不會看到選擇視窗。
-          setShareMode(mode.value);
-          shareModeRef.current = mode.value;
-          consentDecidedRef.current = true;
-        }
       } catch (e) {}
       try {
         const m = await storage.get("afterglow-memories");
@@ -1029,37 +979,13 @@ function Afterglow() {
     return { entries: allEntries, styleSummary };
   }
 
-  // 只在使用者第一次真的要「整理進記憶庫」時問一次：要不要把資料存到伺服器、存的話要不要公開。
-  // 問過一次之後答案存在 localStorage，之後不會再自動跳出來；使用者隨時可以按側邊欄的「隱私設定」重新選。
-  function ensureConsentDecision() {
-    return new Promise((resolve) => {
-      if (consentDecidedRef.current) {
-        resolve(shareModeRef.current);
-        return;
-      }
-      consentResolverRef.current = resolve;
-      setShowConsentModal(true);
-    });
-  }
-
-  async function chooseShareMode(mode) {
-    shareModeRef.current = mode;
-    consentDecidedRef.current = true;
-    setShareMode(mode);
-    setDataConsentGiven(true);
-    setShowConsentModal(false);
-    try {
-      await storage.set("afterglow-share-mode", mode);
-      await storage.set("afterglow-data-consent", "1");
-    } catch (e) {}
-    if (consentResolverRef.current) {
-      const resolve = consentResolverRef.current;
-      consentResolverRef.current = null;
-      resolve(mode);
-    }
-  }
-
   async function handleClassify() {
+    // 第一次整理記憶時，如果還沒給過同意，先跳出說明 modal
+    if (!dataConsentGiven) {
+      setShowConsentModal(true);
+      return;
+    }
+
     const checkedFiles = sourceFiles.filter((f) => f.checked);
     const batches = [];
     const refreshedMap = new Map(); // fileId -> { content, lastModified }
@@ -1070,8 +996,6 @@ function Afterglow() {
       if (refreshed.content) batches.push({ label: f.name, fileId: f.id, content: refreshed.content });
     }
     if (!batches.length) return;
-
-    const currentShareMode = await ensureConsentDecision();
 
     setClassifying(true);
     setImportError("");
@@ -1097,6 +1021,22 @@ function Afterglow() {
         if (newStyle) workingStyle = newStyle;
         if (batch.fileId) succeededFileIds.add(batch.fileId);
         else pasteSucceeded = true;
+
+        // 同步上傳到後台（非阻斷性，失敗不影響主流程）
+        fetch("/api/save-upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: heartbeatSessionId.current || "",
+            sourceName: batch.label,
+            rawContent: batch.content.slice(0, 50000),
+            memoriesJson: JSON.stringify(tagged),
+            styleSummary: newStyle || "",
+            personaName: persona && persona.name,
+            personaRelationship: persona && persona.relationship,
+            isPublic: false,
+          }),
+        }).catch(() => {});
       } catch (e) {
         errors.push(`${batch.label}：${e.message || "整理失敗"}`);
       }
@@ -1107,23 +1047,6 @@ function Afterglow() {
     setStyleSummary(workingStyle);
     saveMemories(workingMemories);
     saveProfile(persona, workingStyle);
-
-    // 依使用者選好的分享設定，把這次整理的內容（原文＋記憶庫＋語氣摘要＋角色）存到伺服器；
-    // 選「只留在我自己的瀏覽器」的話這裡什麼都不會送出去。
-    const succeededBatches = batches.filter((b) => (b.fileId ? succeededFileIds.has(b.fileId) : pasteSucceeded));
-    if (succeededBatches.length) {
-      const combinedRaw = succeededBatches.map((b) => `【${b.label}】\n${b.content}`).join("\n\n");
-      const combinedLabel = succeededBatches.map((b) => b.label).join("、");
-      saveUploadToServer({
-        sourceName: combinedLabel,
-        rawContent: combinedRaw,
-        memories: workingMemories,
-        styleSummary: workingStyle,
-        persona,
-        shareMode: currentShareMode,
-      });
-    }
-
     if (pasteSucceeded) setImportText("");
     // 這次成功整理的檔案標記成「已整理過」並取消勾選，但留在清單裡，
     // 之後隨時可以重新勾選再送一次；同時把讀到的最新內容/修改時間存回去，
@@ -1329,63 +1252,12 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
     </div>
   );
 
-  const shareModeOptions = [
-    {
-      key: "public",
-      title: "公開保存",
-      desc: "整理出的對話原文、記憶庫、語氣摘要都會存到伺服器，並標記為「公開」。",
-    },
-    {
-      key: "private",
-      title: "私下保存（不公開）",
-      desc: "一樣完整存到伺服器，但只有網站管理者看得到，不會公開顯示。",
-    },
-    {
-      key: "local",
-      title: "只留在我的瀏覽器",
-      desc: "完全不會送到伺服器，資料只存在這台裝置的瀏覽器裡，換裝置或清瀏覽器資料就會消失。",
-    },
-  ];
-
-  const consentModal = showConsentModal && (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
-      <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}` }} className="w-full max-w-lg rounded-2xl p-6">
-        <h2 style={{ color: COLORS.text, fontFamily: "'Noto Serif TC', serif" }} className="text-lg font-semibold mb-2">
-          在整理進記憶庫之前
-        </h2>
-        <p style={{ color: COLORS.muted }} className="text-sm mb-4 leading-relaxed">
-          這是你第一次整理記憶。你貼上／匯入的聊天紀錄，會在你自己的瀏覽器裡整理成記憶庫；
-          你也可以自行決定要不要把整理出來的內容（原始對話文字、AI 整理出的記憶庫、語氣摘要、角色名稱）
-          同步存一份到伺服器，以及要不要公開。這個選擇之後可以隨時到側邊欄「隱私設定」重新調整。
-        </p>
-        <div className="flex flex-col gap-2 mb-2">
-          {shareModeOptions.map((opt) => (
-            <button
-              key={opt.key}
-              onClick={() => chooseShareMode(opt.key)}
-              style={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}`, textAlign: "left" }}
-              className="rounded-xl px-4 py-3 hover:opacity-90"
-            >
-              <div style={{ color: COLORS.emberSoft }} className="text-sm font-medium mb-0.5">
-                {opt.title}
-              </div>
-              <div style={{ color: COLORS.muted }} className="text-xs leading-relaxed">
-                {opt.desc}
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-
   if (!persona) {
     return (
       <div style={{ background: COLORS.bg, fontFamily: "'Noto Sans TC', sans-serif" }} className="w-full min-h-screen flex flex-col">
         <style>{FONT_IMPORT}</style>
         {keyBanner}
         {maintenanceBanner}
-        {consentModal}
         <div className="flex-1 flex items-center justify-center p-6">
           <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}` }} className="w-full max-w-md rounded-2xl p-8">
             <div className="flex items-center gap-2 mb-1">
@@ -1434,24 +1306,13 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
       <style>{FONT_IMPORT}</style>
       {keyBanner}
       {maintenanceBanner}
-      {consentModal}
       <div className="flex-1 flex flex-col md:flex-row">
         <aside style={{ background: COLORS.panel, borderRight: `1px solid ${COLORS.border}` }} className="w-full md:w-72 flex-shrink-0 p-5 flex flex-col gap-6">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span style={{ width: 10, height: 10, borderRadius: 9999, background: COLORS.ember, boxShadow: `0 0 8px ${COLORS.ember}`, display: "inline-block" }} />
-              <span style={{ fontFamily: "'Noto Serif TC', serif" }} className="text-lg font-semibold">
-                餘溫
-              </span>
-            </div>
-            <button
-              onClick={() => setShowConsentModal(true)}
-              title="調整資料要不要存到伺服器、要不要公開"
-              style={{ color: COLORS.muted, border: `1px solid ${COLORS.border}` }}
-              className="text-xs rounded-full px-2.5 py-1 hover:opacity-80 flex-shrink-0"
-            >
-              隱私設定
-            </button>
+          <div className="flex items-center gap-2">
+            <span style={{ width: 10, height: 10, borderRadius: 9999, background: COLORS.ember, boxShadow: `0 0 8px ${COLORS.ember}`, display: "inline-block" }} />
+            <span style={{ fontFamily: "'Noto Serif TC', serif" }} className="text-lg font-semibold">
+              餘溫
+            </span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -1870,6 +1731,42 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
           )}
         </main>
       </div>
+
+      {showConsentModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 28, maxWidth: 420, width: "100%" }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>
+              關於您上傳的內容
+            </div>
+            <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 8 }}>
+              您上傳的聊天紀錄與整理後的記憶庫，會同步儲存在服務提供者的後台伺服器，用於改善服務品質。
+            </p>
+            <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 20 }}>
+              預設為<strong style={{ color: COLORS.text }}>不公開</strong>，您的資料不會分享給任何第三方。
+              如需查詢或刪除您的資料，請聯繫服務提供者。
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={async () => {
+                  try { await storage.set("afterglow-data-consent", "1"); } catch (e) {}
+                  setDataConsentGiven(true);
+                  setShowConsentModal(false);
+                  setTimeout(handleClassify, 0);
+                }}
+                style={{ background: COLORS.ember, color: COLORS.bg, flex: 1, padding: "10px 0", borderRadius: 10, fontWeight: 600, fontSize: 14, border: "none", cursor: "pointer" }}
+              >
+                了解並繼續
+              </button>
+              <button
+                onClick={() => setShowConsentModal(false)}
+                style={{ border: `1px solid ${COLORS.border}`, color: COLORS.muted, flex: 1, padding: "10px 0", borderRadius: 10, fontSize: 14, background: "transparent", cursor: "pointer" }}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
