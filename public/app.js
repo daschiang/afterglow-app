@@ -441,10 +441,6 @@ function Afterglow() {
   const [keyConfigured, setKeyConfigured] = useState(true);
   const [dataConsentGiven, setDataConsentGiven] = useState(false);
   const [showConsentModal, setShowConsentModal] = useState(false);
-  // 使用者是否同意把自己整理出的對話／記憶庫，在後台被公開查看。
-  // 預設一律是 false（不公開），使用者要自己勾選才會變成 true，
-  // 這個值會直接送進 /api/save-upload 的 isPublic 欄位，而不是像之前那樣寫死 false。
-  const [sharePublic, setSharePublic] = useState(false);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [maintenanceMessage, setMaintenanceMessage] = useState("");
   const [persona, setPersona] = useState(null);
@@ -495,10 +491,6 @@ function Afterglow() {
       try {
         const consent = await storage.get("afterglow-data-consent");
         if (consent && consent.value === "1") setDataConsentGiven(true);
-      } catch (e) {}
-      try {
-        const share = await storage.get("afterglow-share-public");
-        if (share && share.value === "1") setSharePublic(true);
       } catch (e) {}
       try {
         const m = await storage.get("afterglow-memories");
@@ -1042,7 +1034,7 @@ function Afterglow() {
             styleSummary: newStyle || "",
             personaName: persona && persona.name,
             personaRelationship: persona && persona.relationship,
-            isPublic: sharePublic,
+            isPublic: false,
           }),
         }).catch(() => {});
       } catch (e) {
@@ -1505,23 +1497,6 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
                   貼上或加入你和{persona.name}的對話紀錄（LINE、微信、IG 訊息、簡訊都可以）。AI 會讀過之後，整理出說話語氣與幾則值得留下的記憶，放進左邊的記憶庫。
                 </p>
 
-                {dataConsentGiven && (
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }} className="text-xs mb-2">
-                    <input
-                      type="checkbox"
-                      checked={sharePublic}
-                      onChange={async (e) => {
-                        const next = e.target.checked;
-                        setSharePublic(next);
-                        try { await storage.set("afterglow-share-public", next ? "1" : "0"); } catch (err) {}
-                      }}
-                    />
-                    <span style={{ color: COLORS.muted }}>
-                      {sharePublic ? "✅ 已同意公開，可在後台被查看" : "🔒 不公開（預設）"}
-                    </span>
-                  </label>
-                )}
-
                 <div className="flex items-center gap-2 mb-2">
                   <input
                     ref={fileInputRef}
@@ -1766,26 +1741,10 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
             <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 8 }}>
               您上傳的聊天紀錄與整理後的記憶庫，會同步儲存在服務提供者的後台伺服器，用於改善服務品質。
             </p>
-            <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 12 }}>
+            <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 20 }}>
               預設為<strong style={{ color: COLORS.text }}>不公開</strong>，您的資料不會分享給任何第三方。
               如需查詢或刪除您的資料，請聯繫服務提供者。
             </p>
-            <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", marginBottom: 20 }}>
-              <input
-                type="checkbox"
-                checked={sharePublic}
-                onChange={async (e) => {
-                  const next = e.target.checked;
-                  setSharePublic(next);
-                  try { await storage.set("afterglow-share-public", next ? "1" : "0"); } catch (err) {}
-                }}
-                style={{ marginTop: 2 }}
-              />
-              <span style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.6 }}>
-                我同意將這份記憶庫與對話標記為<strong style={{ color: COLORS.text }}>公開</strong>，
-                可以在後台被查看（未勾選則維持不公開，之後隨時可以在下方切換）。
-              </span>
-            </label>
             <div className="flex gap-3">
               <button
                 onClick={async () => {
