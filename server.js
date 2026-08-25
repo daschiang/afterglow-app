@@ -838,12 +838,12 @@ async function viewUpload(id) {
   document.getElementById("detailTitle").textContent =
     "[" + d.created_at.slice(0,16).replace("T"," ") + "] " + (d.persona_name||"") + "（" + (d.source_name||"未知來源") + "）";
   let body = "";
-  if (d.style_summary) body += "【語氣摘要】\n" + d.style_summary + "\n\n";
+  if (d.style_summary) body += "【語氣摘要】\\n" + d.style_summary + "\\n\\n";
   try {
     const mems = JSON.parse(d.memories_json || "[]");
-    if (mems.length) body += "【記憶庫項目】\n" + mems.map((m,i) => (i+1)+". ["+m.category+"] "+m.content).join("\n") + "\n\n";
+    if (mems.length) body += "【記憶庫項目】\\n" + mems.map((m,i) => (i+1)+". ["+m.category+"] "+m.content).join("\\n") + "\\n\\n";
   } catch(e) {}
-  if (d.raw_content) body += "【原始上傳內容】\n" + d.raw_content.slice(0, 3000) + (d.raw_content.length > 3000 ? "\n…（內容過長，只顯示前 3000 字）" : "");
+  if (d.raw_content) body += "【原始上傳內容】\\n" + d.raw_content.slice(0, 3000) + (d.raw_content.length > 3000 ? "\\n…（內容過長，只顯示前 3000 字）" : "");
   document.getElementById("detailBody").textContent = body || "（無內容）";
   document.getElementById("uploadDetail").style.display = "block";
   document.getElementById("uploadDetail").scrollIntoView({ behavior: "smooth", block: "start" });
