@@ -441,6 +441,8 @@ function Afterglow() {
   const [keyConfigured, setKeyConfigured] = useState(true);
   const [dataConsentGiven, setDataConsentGiven] = useState(false);
   const [showConsentModal, setShowConsentModal] = useState(false);
+  const [publicConsent, setPublicConsent] = useState(false);
+  const [consentSaving, setConsentSaving] = useState(false);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [maintenanceMessage, setMaintenanceMessage] = useState("");
   const [persona, setPersona] = useState(null);
@@ -491,6 +493,8 @@ function Afterglow() {
       try {
         const consent = await storage.get("afterglow-data-consent");
         if (consent && consent.value === "1") setDataConsentGiven(true);
+        const pub = await storage.get("afterglow-public-consent");
+        if (pub && pub.value === "1") setPublicConsent(true);
       } catch (e) {}
       try {
         const m = await storage.get("afterglow-memories");
@@ -738,6 +742,22 @@ function Afterglow() {
     const p = { name: setupName.trim(), relationship: setupRelation.trim() || "重要的人" };
     setPersona(p);
     saveProfile(p, "");
+  }
+
+  async function handleTogglePublicConsent() {
+    const next = !publicConsent;
+    setConsentSaving(true);
+    try {
+      await storage.set("afterglow-public-consent", next ? "1" : "0");
+      setPublicConsent(next);
+      await fetch("/api/update-consent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: heartbeatSessionId.current || "", isPublic: next }),
+      }).catch(() => {});
+    } finally {
+      setConsentSaving(false);
+    }
   }
 
   async function handleReset() {
@@ -1034,7 +1054,7 @@ function Afterglow() {
             styleSummary: newStyle || "",
             personaName: persona && persona.name,
             personaRelationship: persona && persona.relationship,
-            isPublic: false,
+            isPublic: publicConsent,
           }),
         }).catch(() => {});
       } catch (e) {
@@ -1218,6 +1238,22 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
       const finalMessages = [...nextMessages, assistantMsg];
       setMessages(finalMessages);
       saveMessages(finalMessages);
+
+      // 同步存一份對話紀錄到後台（非阻斷性，失敗不影響主流程）；
+      // 只有使用者已經看過並同意上傳說明之後才會記錄。
+      if (dataConsentGiven) {
+        fetch("/api/save-message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: heartbeatSessionId.current || "",
+            personaName: persona && persona.name,
+            personaRelationship: persona && persona.relationship,
+            userMessage: userMsg.content,
+            assistantMessage: assistantMsg.content,
+          }),
+        }).catch(() => {});
+      }
     } catch (e) {
       const errMsg = { id: `${Date.now()}-e`, role: "assistant", content: `（訊息傳送失敗：${e.message || "請稍後再試一次"}）` };
       setMessages([...nextMessages, errMsg]);
@@ -1378,6 +1414,17 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
               })}
             </div>
           </div>
+
+          {dataConsentGiven && (
+            <button
+              onClick={handleTogglePublicConsent}
+              disabled={consentSaving}
+              style={{ color: publicConsent ? COLORS.emberSoft : COLORS.muted, border: `1px solid ${COLORS.border}`, opacity: consentSaving ? 0.6 : 1 }}
+              className="text-xs flex items-center gap-1.5 justify-center rounded-lg py-2 hover:opacity-80"
+            >
+              {publicConsent ? "✅ 已同意公開（點此改為不公開）" : "🔒 未公開（點此同意公開協助訓練）"}
+            </button>
+          )}
 
           <button
             onClick={handleReset}
@@ -1741,14 +1788,31 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
             <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 8 }}>
               您上傳的聊天紀錄與整理後的記憶庫，會同步儲存在服務提供者的後台伺服器，用於改善服務品質。
             </p>
-            <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 20 }}>
+            <p style={{ color: COLORS.muted, fontSize: 13, lineHeight: 1.75, marginBottom: 16 }}>
               預設為<strong style={{ color: COLORS.text }}>不公開</strong>，您的資料不會分享給任何第三方。
               如需查詢或刪除您的資料，請聯繫服務提供者。
             </p>
+            <label
+              style={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}` }}
+              className="flex items-start gap-2.5 rounded-xl p-3 mb-5 cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={publicConsent}
+                onChange={(e) => setPublicConsent(e.target.checked)}
+                className="mt-0.5 flex-shrink-0"
+              />
+              <span style={{ color: COLORS.muted, fontSize: 12, lineHeight: 1.6 }}>
+                （選填）我同意將這份資料公開，協助改善 AI 服務。您隨時可以在側邊欄改變這個選擇。
+              </span>
+            </label>
             <div className="flex gap-3">
               <button
                 onClick={async () => {
-                  try { await storage.set("afterglow-data-consent", "1"); } catch (e) {}
+                  try {
+                    await storage.set("afterglow-data-consent", "1");
+                    await storage.set("afterglow-public-consent", publicConsent ? "1" : "0");
+                  } catch (e) {}
                   setDataConsentGiven(true);
                   setShowConsentModal(false);
                   setTimeout(handleClassify, 0);

@@ -73,6 +73,19 @@ try {
       ip TEXT
     );
   `);
+  // 存放使用者跟 AI 角色的即時對話內容
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chat_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      session_id TEXT,
+      persona_name TEXT,
+      persona_relationship TEXT,
+      role TEXT,
+      content TEXT,
+      ip TEXT
+    );
+  `);
   console.log(`用量統計資料庫已就緒：${DB_PATH}`);
 } catch (e) {
   dbError = e.message || String(e);
@@ -194,14 +207,41 @@ app.post("/api/save-upload", (req, res) => {
   }
 });
 
-// 更新公開同意狀態（後台或使用者可以切換）
-app.post("/api/set-public", (req, res) => {
+// 更新公開同意狀態——由使用者自己透過前端呼叫，不是後台決定。
+// 依 sessionId 批次更新這個瀏覽分頁（同一個人）上傳過的所有紀錄，
+// 讓使用者事後改變心意時，之前上傳的內容也會跟著套用新的選擇。
+app.post("/api/update-consent", (req, res) => {
   if (!db) return res.json({ ok: false });
-  const { uploadId, isPublic } = req.body || {};
+  const { sessionId, isPublic } = req.body || {};
+  if (!sessionId) return res.json({ ok: false, error: "缺少 sessionId" });
   try {
-    db.prepare("UPDATE user_uploads SET is_public = ? WHERE id = ?").run(isPublic ? 1 : 0, uploadId);
+    const result = db.prepare("UPDATE user_uploads SET is_public = ? WHERE session_id = ?").run(isPublic ? 1 : 0, sessionId);
+    res.json({ ok: true, updated: result.changes });
+  } catch (e) {
+    res.json({ ok: false });
+  }
+});
+
+// 儲存使用者跟 AI 角色的即時對話內容（每次收到 AI 回覆後同步呼叫）
+app.post("/api/save-message", (req, res) => {
+  if (!db) return res.json({ ok: false });
+  const { sessionId, personaName, personaRelationship, userMessage, assistantMessage } = req.body || {};
+  const clientIp = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString().split(",")[0].trim();
+  try {
+    const insert = db.prepare(`
+      INSERT INTO chat_logs (created_at, session_id, persona_name, persona_relationship, role, content, ip)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const now = new Date().toISOString();
+    if (typeof userMessage === "string" && userMessage) {
+      insert.run(now, sessionId || "", personaName || "", personaRelationship || "", "user", userMessage, clientIp);
+    }
+    if (typeof assistantMessage === "string" && assistantMessage) {
+      insert.run(now, sessionId || "", personaName || "", personaRelationship || "", "assistant", assistantMessage, clientIp);
+    }
     res.json({ ok: true });
   } catch (e) {
+    console.warn("儲存對話紀錄失敗：", e.message);
     res.json({ ok: false });
   }
 });
@@ -472,6 +512,39 @@ app.get("/api/admin/uploads/:id", requireAdminAuth, (req, res) => {
   res.json(row);
 });
 
+// 對話紀錄：先列出「每個分頁（session）」的摘要，再點進去看完整對話。
+app.get("/api/admin/chats", requireAdminAuth, (req, res) => {
+  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const perPage = 20;
+  const offset = (page - 1) * perPage;
+  const total = db.prepare("SELECT COUNT(DISTINCT session_id) AS c FROM chat_logs WHERE session_id IS NOT NULL AND session_id != ''").get().c;
+  const rows = db.prepare(
+    `SELECT session_id,
+            MAX(persona_name) AS persona_name,
+            MAX(persona_relationship) AS persona_relationship,
+            COUNT(*) AS message_count,
+            MIN(created_at) AS started_at,
+            MAX(created_at) AS last_at,
+            MAX(ip) AS ip
+     FROM chat_logs
+     WHERE session_id IS NOT NULL AND session_id != ''
+     GROUP BY session_id
+     ORDER BY last_at DESC
+     LIMIT ? OFFSET ?`
+  ).all(perPage, offset);
+  res.json({ total, page, perPage, rows });
+});
+
+app.get("/api/admin/chats/:sessionId", requireAdminAuth, (req, res) => {
+  if (!db) return res.status(503).json({ error: "資料庫未就緒" });
+  const rows = db
+    .prepare("SELECT role, content, created_at FROM chat_logs WHERE session_id = ? ORDER BY id ASC")
+    .all(req.params.sessionId);
+  if (!rows.length) return res.status(404).json({ error: "找不到這個對話" });
+  res.json({ sessionId: req.params.sessionId, messages: rows });
+});
+
 // 快速自我檢測：不改任何資料，單純打一個最小的請求給 OpenAI，
 // 出問題時可以馬上判斷「是我們自己的伺服器掛了」還是「OpenAI 那邊有問題／金鑰失效」。
 app.post("/api/admin/test-connection", requireAdminAuth, async (req, res) => {
@@ -587,6 +660,9 @@ app.get("/admin", requireAdminAuth, (req, res) => {
 
 <section style="margin-top:20px;">
   <h2>📂 用戶上傳紀錄</h2>
+  <div class="muted" style="margin-bottom:10px;">
+    是否公開由使用者自己在網頁上決定並可隨時修改，後台這裡只能查看目前的狀態，沒辦法直接更改。
+  </div>
   <div id="uploadSummary" class="muted" style="margin-bottom:10px;">載入中...</div>
   <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
     <button class="btn btn-neutral" onclick="loadUploads('all')" id="filterAll">全部</button>
@@ -604,6 +680,24 @@ app.get("/admin", requireAdminAuth, (req, res) => {
     <div id="detailBody" style="font-size:12px; color:#9a8b93; white-space:pre-wrap; max-height:300px; overflow-y:auto;"></div>
   </div>
   <div id="uploadList"></div>
+</section>
+
+<section style="margin-top:20px;">
+  <h2>💬 對話紀錄</h2>
+  <div id="chatSummary" class="muted" style="margin-bottom:10px;">載入中...</div>
+  <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+    <span id="chatPageInfo" class="muted"></span>
+    <button class="btn btn-neutral" id="chatPrevPage" onclick="changeChatPage(-1)" style="display:none;">◀ 上一頁</button>
+    <button class="btn btn-neutral" id="chatNextPage" onclick="changeChatPage(1)" style="display:none;">下一頁 ▶</button>
+  </div>
+  <div id="chatDetail" style="display:none; margin-bottom:12px; background:#241A2B; border:1px solid #382b3f; border-radius:10px; padding:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <strong id="chatDetailTitle" style="font-size:13px;"></strong>
+      <button class="btn btn-neutral" onclick="closeChatDetail()" style="padding:4px 10px; font-size:12px;">關閉</button>
+    </div>
+    <div id="chatDetailBody" style="font-size:12px; max-height:400px; overflow-y:auto;"></div>
+  </div>
+  <div id="chatList"></div>
 </section>
 
 <div id="app"></div>
@@ -776,6 +870,7 @@ loadSettings();
 load();
 loadOnline();
 loadUploads("all");
+loadChats();
 setInterval(loadOnline, 30000);
 setInterval(load, 60000);
 
@@ -815,7 +910,7 @@ async function loadUploads(filter) {
       '<td>' + (r.memory_count||0) + ' 則</td>' +
       '<td>' + (r.raw_len ? (Math.round(r.raw_len/100)/10)+"k 字" : "-") + '</td>' +
       '<td style="font-size:11px;color:#9a8b93;">' + (r.ip||"-") + '</td>' +
-      '<td><button class="btn ' + (r.is_public ? "btn-safe" : "btn-neutral") + '" style="padding:4px 10px; font-size:12px;" onclick="togglePublic(' + r.id + ',' + r.is_public + ')">' + (r.is_public ? "✅ 公開中" : "🔒 未公開") + '</button></td>' +
+      '<td><span class="status-badge ' + (r.is_public ? "status-off" : "status-on") + '">' + (r.is_public ? "✅ 公開中" : "🔒 未公開") + '</span></td>' +
       '<td><button class="btn btn-neutral" style="padding:4px 10px; font-size:12px;" onclick="viewUpload(' + r.id + ')">查看</button></td>' +
     '</tr>').join("") +
     '</tbody></table>';
@@ -823,11 +918,6 @@ async function loadUploads(filter) {
 
 function changePage(delta) {
   uploadCurrentPage = Math.max(1, Math.min(uploadTotalPages, uploadCurrentPage + delta));
-  loadUploads();
-}
-
-async function togglePublic(id, current) {
-  await fetch("/api/set-public", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ uploadId: id, isPublic: !current }) });
   loadUploads();
 }
 
@@ -851,6 +941,73 @@ async function viewUpload(id) {
 
 function closeDetail() {
   document.getElementById("uploadDetail").style.display = "none";
+}
+
+// ---- 對話紀錄 ----
+let chatCurrentPage = 1;
+let chatTotalPages = 1;
+
+async function loadChats() {
+  const res = await fetch("/api/admin/chats?page=" + chatCurrentPage);
+  if (!res.ok) { document.getElementById("chatList").innerHTML = '<div class="muted">讀取失敗</div>'; return; }
+  const d = await res.json();
+  chatTotalPages = Math.max(1, Math.ceil(d.total / d.perPage));
+
+  document.getElementById("chatSummary").textContent = "共 " + d.total + " 個對話分頁";
+  document.getElementById("chatPageInfo").textContent = d.total > d.perPage ? "第 " + d.page + " / " + chatTotalPages + " 頁" : "";
+  document.getElementById("chatPrevPage").style.display = chatCurrentPage > 1 ? "inline-block" : "none";
+  document.getElementById("chatNextPage").style.display = chatCurrentPage < chatTotalPages ? "inline-block" : "none";
+
+  if (!d.rows.length) {
+    document.getElementById("chatList").innerHTML = '<div class="muted" style="padding:12px;">目前還沒有對話紀錄。</div>';
+    return;
+  }
+  document.getElementById("chatList").innerHTML =
+    '<table><thead><tr>' +
+    '<th>角色</th><th>開始時間</th><th>最後訊息</th><th>訊息數</th><th>IP</th><th>查看</th>' +
+    '</tr></thead><tbody>' +
+    d.rows.map(r => '<tr>' +
+      '<td>' + (r.persona_name||"-") + (r.persona_relationship ? "（"+r.persona_relationship+"）" : "") + '</td>' +
+      '<td>' + r.started_at.slice(0,16).replace("T"," ") + '</td>' +
+      '<td>' + r.last_at.slice(0,16).replace("T"," ") + '</td>' +
+      '<td>' + r.message_count + ' 則</td>' +
+      '<td style="font-size:11px;color:#9a8b93;">' + (r.ip||"-") + '</td>' +
+      '<td><button class="btn btn-neutral" style="padding:4px 10px; font-size:12px;" onclick="viewChat(' + JSON.stringify(r.session_id) + ')">查看</button></td>' +
+    '</tr>').join("") +
+    '</tbody></table>';
+}
+
+function changeChatPage(delta) {
+  chatCurrentPage = Math.max(1, Math.min(chatTotalPages, chatCurrentPage + delta));
+  loadChats();
+}
+
+async function viewChat(sessionId) {
+  const res = await fetch("/api/admin/chats/" + encodeURIComponent(sessionId));
+  if (!res.ok) return;
+  const d = await res.json();
+  document.getElementById("chatDetailTitle").textContent = "對話紀錄（" + d.messages.length + " 則訊息）";
+  document.getElementById("chatDetailBody").innerHTML = d.messages.map(function (m) {
+    const isUser = m.role === "user";
+    const label = isUser ? "使用者" : "AI";
+    const time = m.created_at.slice(11,16);
+    return '<div style="margin-bottom:8px; text-align:' + (isUser ? "right" : "left") + ';">' +
+      '<div style="font-size:10px; color:#9a8b93; margin-bottom:2px;">' + label + ' · ' + time + '</div>' +
+      '<div style="display:inline-block; max-width:80%; padding:6px 10px; border-radius:8px; background:' + (isUser ? "#382b3f" : "#4A3A1A") + '; color:#F2E9E4; font-size:12px; white-space:pre-wrap; text-align:left;">' +
+      escapeHtml(m.content) + '</div></div>';
+  }).join("");
+  document.getElementById("chatDetail").style.display = "block";
+  document.getElementById("chatDetail").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closeChatDetail() {
+  document.getElementById("chatDetail").style.display = "none";
+}
+
+function escapeHtml(s) {
+  const div = document.createElement("div");
+  div.textContent = s;
+  return div.innerHTML;
 }
 </script>
 </body>
