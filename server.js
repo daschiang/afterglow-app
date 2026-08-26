@@ -879,6 +879,21 @@ let uploadCurrentFilter = "all";
 let uploadCurrentPage = 1;
 let uploadTotalPages = 1;
 
+// ---- 對話紀錄 ----
+let chatCurrentPage = 1;
+let chatTotalPages = 1;
+
+document.getElementById("toggleBtn").addEventListener("click", toggleMaintenance);
+document.getElementById("saveMsgBtn").addEventListener("click", saveMessage);
+document.getElementById("testBtn").addEventListener("click", testConnection);
+loadSettings();
+load();
+loadOnline();
+loadUploads("all");
+loadChats();
+setInterval(loadOnline, 30000);
+setInterval(load, 60000);
+
 async function loadUploads(filter) {
   if (filter) { uploadCurrentFilter = filter; uploadCurrentPage = 1; }
   ["filterAll","filterPublic","filterPrivate"].forEach(id => document.getElementById(id).style.opacity = "0.5");
