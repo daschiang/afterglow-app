@@ -947,10 +947,6 @@ function closeDetail() {
   document.getElementById("uploadDetail").style.display = "none";
 }
 
-// ---- 對話紀錄 ----
-let chatCurrentPage = 1;
-let chatTotalPages = 1;
-
 async function loadChats() {
   const res = await fetch("/api/admin/chats?page=" + chatCurrentPage);
   if (!res.ok) { document.getElementById("chatList").innerHTML = '<div class="muted">讀取失敗</div>'; return; }
