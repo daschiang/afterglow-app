@@ -863,17 +863,6 @@ function section(title, headers, rows) {
     '</tbody></table></section>';
 }
 
-document.getElementById("toggleBtn").addEventListener("click", toggleMaintenance);
-document.getElementById("saveMsgBtn").addEventListener("click", saveMessage);
-document.getElementById("testBtn").addEventListener("click", testConnection);
-loadSettings();
-load();
-loadOnline();
-loadUploads("all");
-loadChats();
-setInterval(loadOnline, 30000);
-setInterval(load, 60000);
-
 // ---- 用戶上傳紀錄 ----
 let uploadCurrentFilter = "all";
 let uploadCurrentPage = 1;
