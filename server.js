@@ -972,7 +972,7 @@ async function loadChats() {
       '<td>' + r.last_at.slice(0,16).replace("T"," ") + '</td>' +
       '<td>' + r.message_count + ' 則</td>' +
       '<td style="font-size:11px;color:#9a8b93;">' + (r.ip||"-") + '</td>' +
-      '<td><button class="btn btn-neutral" style="padding:4px 10px; font-size:12px;" onclick='viewChat(" + JSON.stringify(r.session_id) + ")'>查看</button></td>' +
+      '<td><button class="btn btn-neutral" style="padding:4px 10px; font-size:12px;" onclick=\\'viewChat(&quot;' + escapeHtml(r.session_id) + '&quot;)\\'>查看</button></td>' +
     '</tr>').join("") +
     '</tbody></table>';
 }
