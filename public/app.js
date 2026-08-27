@@ -441,6 +441,7 @@ function Afterglow() {
   const [keyConfigured, setKeyConfigured] = useState(true);
   const [dataConsentGiven, setDataConsentGiven] = useState(false);
   const [showConsentModal, setShowConsentModal] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [publicConsent, setPublicConsent] = useState(false);
   const [consentSaving, setConsentSaving] = useState(false);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
@@ -1276,6 +1277,47 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
     );
   }
 
+  const helpModal = showHelp && (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="help-title"
+      onClick={(e) => { if (e.target === e.currentTarget) setShowHelp(false); }}
+      style={{ background: "rgba(10, 7, 13, 0.78)" }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+    >
+      <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, maxHeight: "min(760px, 90vh)" }} className="w-full max-w-lg overflow-y-auto rounded-2xl p-5 shadow-2xl">
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <div style={{ color: COLORS.emberSoft }} className="text-xs mb-1">第一次使用？</div>
+            <h2 id="help-title" style={{ fontFamily: "'Noto Serif TC', serif", color: COLORS.text }} className="text-xl font-semibold">餘溫怎麼使用</h2>
+          </div>
+          <button onClick={() => setShowHelp(false)} aria-label="關閉使用說明" style={{ color: COLORS.muted, border: `1px solid ${COLORS.border}` }} className="rounded-lg px-2.5 py-1 text-sm hover:opacity-80">關閉</button>
+        </div>
+        <div className="flex flex-col gap-3">
+          {[
+            ["1", "先建立一個角色", "輸入你想記住的人的名字與關係，例如「爸爸」或「阿嬤」。這只是用來替記憶庫和對話標示名稱。"],
+            ["2", "放入聊天紀錄", "到「整理記憶」分頁，貼上 LINE、微信、IG、簡訊等對話文字，或匯入 TXT、CSV、JSON、XLSX 檔案。內容越接近日常對話，整理出的語氣越自然。"],
+            ["3", "整理成記憶庫", "按下「整理進記憶庫」，AI 會從紀錄中整理說話方式、日常習慣、價值觀與共同回憶。你可以檢查、刪除不想保留的項目。"],
+            ["4", "開始對話", "切換到「對話」分頁，直接傳訊息即可。這是根據你提供的紀錄重建出的語氣模擬，不是本人，也不會知道記憶庫以外的事情。"],
+          ].map(([number, title, description]) => (
+            <div key={number} style={{ background: COLORS.panelAlt, border: `1px solid ${COLORS.border}` }} className="flex gap-3 rounded-xl p-3">
+              <span style={{ background: COLORS.ember, color: COLORS.bg }} className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-xs font-semibold">{number}</span>
+              <div>
+                <div style={{ color: COLORS.text }} className="text-sm font-medium mb-1">{title}</div>
+                <p style={{ color: COLORS.muted }} className="text-xs leading-relaxed">{description}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ background: "rgba(232,166,96,0.08)", border: `1px solid rgba(232,166,96,0.2)` }} className="mt-4 rounded-xl p-3">
+          <div style={{ color: COLORS.emberSoft }} className="text-xs font-medium mb-1">資料提醒</div>
+          <p style={{ color: COLORS.muted }} className="text-xs leading-relaxed">資料預設保存在你的瀏覽器本機。使用 AI 整理或對話時，相關內容會送到服務伺服器處理；是否將上傳紀錄公開由你決定，預設為不公開。重要資料建議定期使用「匯出」備份。</p>
+        </div>
+      </div>
+    </div>
+  );
+
   const keyBanner = !keyConfigured && (
     <div style={{ background: "#4A2A2A", color: "#F2C9C9", borderBottom: `1px solid ${COLORS.border}` }} className="text-xs px-4 py-2 text-center">
       伺服器尚未設定 OPENAI_API_KEY，AI 功能暫時無法使用（請參考 README 設定環境變數後重啟伺服器）。
@@ -1294,6 +1336,7 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
         <style>{FONT_IMPORT}</style>
         {keyBanner}
         {maintenanceBanner}
+        {helpModal}
         <div className="flex-1 flex items-center justify-center p-6">
           <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}` }} className="w-full max-w-md rounded-2xl p-8">
             <div className="flex items-center gap-2 mb-1">
@@ -1328,6 +1371,9 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
             <button onClick={startPersona} style={{ background: COLORS.ember, color: COLORS.bg }} className="w-full rounded-lg py-2.5 text-sm font-medium">
               開始整理回憶
             </button>
+            <button onClick={() => setShowHelp(true)} style={{ color: COLORS.emberSoft, border: `1px solid ${COLORS.border}` }} className="mt-2 w-full rounded-lg py-2 text-xs hover:opacity-80">
+              先看看怎麼使用
+            </button>
             <p style={{ color: COLORS.muted }} className="text-xs mt-5 leading-relaxed">
               這是一個以 AI 根據聊天紀錄重建語氣的紀念小工具，重建出來的內容是模擬，不是本人。如果你正在經歷比較沉重的失落，也歡迎找信任的人或專業資源聊聊。
             </p>
@@ -1342,6 +1388,7 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
       <style>{FONT_IMPORT}</style>
       {keyBanner}
       {maintenanceBanner}
+      {helpModal}
       <div className="flex-1 flex flex-col md:flex-row">
         <aside style={{ background: COLORS.panel, borderRight: `1px solid ${COLORS.border}` }} className="w-full md:w-72 flex-shrink-0 p-5 flex flex-col gap-6">
           <div className="flex items-center gap-2">
@@ -1436,7 +1483,8 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
         </aside>
 
         <main className="flex-1 flex flex-col min-w-0">
-          <div style={{ borderBottom: `1px solid ${COLORS.border}` }} className="flex px-5 pt-4 gap-1">
+          <div style={{ borderBottom: `1px solid ${COLORS.border}` }} className="flex items-center justify-between px-5 pt-4 gap-1">
+            <div className="flex gap-1">
             <button
               onClick={() => setTab("import")}
               style={{ color: tab === "import" ? COLORS.text : COLORS.muted, borderBottom: tab === "import" ? `2px solid ${COLORS.ember}` : "2px solid transparent" }}
@@ -1450,6 +1498,10 @@ ${grouped || "（記憶庫目前很少，請用溫和、留白的語氣回應，
               className="flex items-center gap-1.5 text-sm px-3 pb-3"
             >
               <IconChat size={14} /> 對話
+            </button>
+            </div>
+            <button onClick={() => setShowHelp(true)} style={{ color: COLORS.emberSoft, border: `1px solid ${COLORS.border}` }} className="mb-2 rounded-lg px-2.5 py-1.5 text-xs hover:opacity-80">
+              使用說明
             </button>
           </div>
 
