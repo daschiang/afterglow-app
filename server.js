@@ -273,28 +273,48 @@ app.post("/api/claude", async (req, res) => {
   ];
 
   try {
-    const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        // 新一點的 OpenAI 模型已經棄用 max_tokens，改用 max_completion_tokens
-        max_completion_tokens: Math.min(Number(max_tokens) || 1000, 16000),
-        messages: chatMessages,
-        // 對話功能會帶 temperature / presence_penalty 讓語氣更自然、減少用詞重複；
-        // 整理記憶那一步沒有帶這兩個參數，維持預設值，讓 JSON 抽取結果盡量穩定精準。
-                ...(OPENAI_MODEL.startsWith("gpt-5.6") ? {} : {
-          ...(typeof temperature === "number" ? { temperature } : {}),
-          ...(typeof presence_penalty === "number" ? { presence_penalty } : {}),
-        }),
-        // 整理記憶那一步需要拿到嚴格的 JSON，用 OpenAI 的 JSON 模式強制輸出格式，
-        // 避免模型偶爾多講幾句廢話讓 JSON.parse 失敗。
-        ...(json ? { response_format: { type: "json_object" } } : {}),
+    const requestBody = JSON.stringify({
+      model: OPENAI_MODEL,
+      // 新一點的 OpenAI 模型已經棄用 max_tokens，改用 max_completion_tokens
+      max_completion_tokens: Math.min(Number(max_tokens) || 1000, 16000),
+      messages: chatMessages,
+      // 對話功能會帶 temperature / presence_penalty 讓語氣更自然、減少用詞重複；
+      // 整理記憶那一步沒有帶這兩個參數，維持預設值，讓 JSON 抽取結果盡量穩定精準。
+      ...(OPENAI_MODEL.startsWith("gpt-5.6") ? {} : {
+        ...(typeof temperature === "number" ? { temperature } : {}),
+        ...(typeof presence_penalty === "number" ? { presence_penalty } : {}),
       }),
+      // 整理記憶那一步需要拿到嚴格的 JSON，用 OpenAI 的 JSON 模式強制輸出格式，
+      // 避免模型偶爾多講幾句廢話讓 JSON.parse 失敗。
+      ...(json ? { response_format: { type: "json_object" } } : {}),
     });
+    let upstream;
+    let lastNetworkError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 90000);
+      try {
+        upstream = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+          body: requestBody,
+          signal: controller.signal,
+        });
+      } catch (e) {
+        lastNetworkError = e.name === "AbortError" ? new Error("上游 AI 服務逾時") : e;
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (upstream && !(upstream.status === 429 || upstream.status >= 500)) break;
+      if (attempt < 2) {
+        if (upstream) await upstream.text().catch(() => {});
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+      }
+    }
+    if (!upstream) throw lastNetworkError || new Error("無法連線到 AI 服務");
 
     const data = await upstream.json();
     const duration_ms = Date.now() - startedAt;

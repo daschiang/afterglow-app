@@ -417,23 +417,35 @@ function Spinner({ size = 14, color = "currentColor" }) {
 
 // ---- 呼叫我們自己的後端（金鑰只存在伺服器上）----
 async function callClaude({ system, messages, max_tokens, json, temperature, presence_penalty }) {
-  const response = await fetch("/api/claude", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      system,
-      messages,
-      max_tokens: max_tokens || 1000,
-      json: Boolean(json),
-      ...(typeof temperature === "number" ? { temperature } : {}),
-      ...(typeof presence_penalty === "number" ? { presence_penalty } : {}),
-    }),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.error || "呼叫失敗");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  try {
+    const response = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system,
+        messages,
+        max_tokens: max_tokens || 1000,
+        json: Boolean(json),
+        ...(typeof temperature === "number" ? { temperature } : {}),
+        ...(typeof presence_penalty === "number" ? { presence_penalty } : {}),
+      }),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || `AI 服務回應失敗（HTTP ${response.status}）`);
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("AI 整理等待太久，請稍後重試；原始資料沒有被刪除。每段內容可以再縮短一些。" );
+    throw e;
+  } finally {
+    clearTimeout(timeout);
   }
-  return data;
 }
 
 function Afterglow() {
@@ -939,30 +951,54 @@ function Afterglow() {
   }
 
   // 呼叫 AI 把一段文字（單一小段，不要太長）整理成記憶項目，回傳未標記來源的原始結果。
+  function parseClassifyJson(raw) {
+    const clean = String(raw || "").replace(/```json|```/gi, "").trim();
+    try {
+      return JSON.parse(clean);
+    } catch (firstError) {
+      // 有些模型會在 JSON 前後多回一小段說明；只取最外層物件再試一次。
+      const start = clean.indexOf("{");
+      const end = clean.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try { return JSON.parse(clean.slice(start, end + 1)); } catch (e) {}
+      }
+      throw new Error("AI 回傳格式不完整，系統會自動重試這一段。");
+    }
+  }
+
   async function classifyBatch(content) {
     const trimmed = content.slice(0, CLASSIFY_CHUNK_SIZE);
     const range = suggestedMemoryRange(trimmed.length);
-    // 每則記憶項目在 JSON 裡大概要花上百來個 token，數量上限抓高一點，
-    // 才不會內容明明很長、AI 也想多整理幾則，卻被輸出長度卡住而被截斷。
-    const maxTokens = Math.min(16000, 500 + range.max * 150);
-    const data = await callClaude({
-      system: buildClassifySystemPrompt(range),
-      messages: [{ role: "user", content: trimmed }],
-      max_tokens: maxTokens,
-      json: true,
-    });
-    const raw = (data.content || []).map((b) => b.text || "").join("");
-    const clean = raw.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-    const entries = (parsed.entries || []).map((e, i) => ({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${i}`,
-      category: CATEGORY_ORDER.includes(e.category) ? e.category : "其他",
-      content: e.content,
-    }));
-    return { entries, styleSummary: parsed.styleSummary || "" };
+    // 輸出空間不要壓得太小，並由後端進行重試，避免偶發截斷直接讓整段失敗。
+    const maxTokens = Math.min(16000, Math.max(1800, 500 + range.max * 150));
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const data = await callClaude({
+          system: buildClassifySystemPrompt(range),
+          messages: [{ role: "user", content: trimmed }],
+          max_tokens: maxTokens,
+          json: true,
+        });
+        const raw = (data.content || []).map((b) => b.text || "").join("");
+        const parsed = parseClassifyJson(raw);
+        const entries = (Array.isArray(parsed.entries) ? parsed.entries : [])
+          .filter((e) => e && typeof e.content === "string" && e.content.trim())
+          .map((e, i) => ({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${i}`,
+            category: CATEGORY_ORDER.includes(e.category) ? e.category : "其他",
+            content: e.content.trim(),
+          }));
+        return { entries, styleSummary: typeof parsed.styleSummary === "string" ? parsed.styleSummary.trim() : "" };
+      } catch (e) {
+        lastError = e;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+      }
+    }
+    throw lastError || new Error("這段內容整理失敗，請再試一次。");
   }
 
-  const CLASSIFY_CHUNK_SIZE = 6000;
+  const CLASSIFY_CHUNK_SIZE = 5000;
   const CLASSIFY_MAX_INPUT = 150000;
 
   // 把文字切成一段一段（盡量在換行處切，避免從句子中間斷開）。
